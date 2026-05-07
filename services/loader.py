@@ -13,7 +13,7 @@ from typing import List, Generator
 import instructor
 from groq import Groq
 from urllib.parse import urlparse
-from app.models.bill import BillExtraction
+from models.bill import BillExtraction
 import httpx
 import tempfile
 
