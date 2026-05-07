@@ -1,6 +1,6 @@
 import instructor
 from groq import Groq
-from ..models.bill import BillExtraction
+from app.models.bill import BillExtraction
 from datetime import datetime
 
 client = instructor.from_groq(Groq())
