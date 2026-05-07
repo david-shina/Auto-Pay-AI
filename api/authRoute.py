@@ -111,11 +111,14 @@ def login(body: LoginRequest, session: Session = Depends(get_session)):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
     return {
-        "user_id": user.id,
-        "email": user.email,
-        "is_telegram_linked": user.is_telegram_linked,
-        "telegram_chat_id": user.telegram_chat_id,
-    }
+    "user_id": user.id,
+    "email": user.email,
+    "is_telegram_linked": user.is_telegram_linked,
+    "telegram_chat_id": user.telegram_chat_id,
+    "account_number": virtualaccount.account_number if virtualaccount else None,
+    "bank_name": virtualaccount.bank_name if virtualaccount else None,
+    "balance": float(user.balance) if hasattr(user, "balance") and user.balance is not None else 0.00,
+}
 
 
 @router.post("/link-code")
