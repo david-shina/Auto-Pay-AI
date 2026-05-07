@@ -3,9 +3,9 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 from .helpers import get_linked_user
-from ..models.transaction import VirtualAccount
+from app.models.transaction import VirtualAccount
 from sqlmodel import Session, select
-from ..core.database import engine
+from app.core.database import engine
 
 logger = logging.getLogger(__name__)
 
