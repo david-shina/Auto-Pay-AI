@@ -8,8 +8,8 @@ import logging
 logger = logging.getLogger(__name__)
 
 # Path to the CSV file — put it in your project root or adjust as needed
-BANK_CODES_FILE = "banks_code.csv"
-BANK_CODES_FILE1 = "Book1.csv"
+BANK_CODES_FILE = "services/banks_code.csv"
+BANK_CODES_FILE1 = "services/Book1.csv"
 
 @lru_cache(maxsize=1)
 def _load_banks() -> dict[str, str]:
