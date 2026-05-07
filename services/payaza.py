@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import base64
 import requests
 
-from ..services.banks import get_bank_code
+from .services.banks import get_bank_code
 
 load_dotenv(dotenv_path='.env')
 logger = logging.getLogger(__name__)
