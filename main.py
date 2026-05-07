@@ -1,8 +1,8 @@
 # main.py
 from fastapi import FastAPI, Request, Response
-from api.billRoute import router
-from api.authRoute import router as authRouter
-from api.webHookRoute import router as webhookRouter
+from .api.billRoute import router
+from .api.authRoute import router as authRouter
+from .api.webHookRoute import router as webhookRouter
 from core.database import init_db
 from handlers import start_command, link_command, build_bill_conversation
 import logging
