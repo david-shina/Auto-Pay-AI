@@ -1,14 +1,14 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
-from app.core.database import get_session
+from .core.database import get_session
 from sqlmodel import Session
 import shutil
-from app.services.loader import PDFLoader
-from app.services.imageloader import ImageLoader
-from app.models.bill import Bill
+from .services.loader import PDFLoader
+from .services.imageloader import ImageLoader
+from .models.bill import Bill
 from datetime import datetime
 import os
 from dateutil import parser
-from app.agents.graphs import build_graph
+from .agents.graphs import build_graph
 
 router = APIRouter(prefix='/api/v1/bill', tags=['bill'])
 ALLOWED_TYPES = ["image/jpeg", "image/png", "application/pdf", 'image/jpg']
