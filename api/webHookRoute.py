@@ -19,7 +19,9 @@ load_dotenv(dotenv_path='.env')
 
 token = os.getenv('PAYAZA_PUBLIC_KEY')
 
-encoded_token = base64.b64encode(token.strip().encode('utf-8')).decode('utf-8')
+encoded_token = None
+if token:
+    encoded_token = base64.b64encode(token.strip().encode('utf-8')).decode('utf-8')
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 logger = logging.getLogger(__name__)
 
@@ -181,9 +183,10 @@ async def test_credit_webhook(
     }
 
     headers = {
-        'Authorization': f'Payaza {encoded_token}',
         'Content-Type': 'application/json'
     }
+    if encoded_token:
+        headers['Authorization'] = f'Payaza {encoded_token}'
 
     try:
         async with httpx.AsyncClient() as client:
