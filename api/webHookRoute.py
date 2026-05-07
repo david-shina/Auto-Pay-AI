@@ -1,16 +1,16 @@
 from fastapi import APIRouter, Request, HTTPException, Depends
 from sqlmodel import Session, select
-from ..core.database import engine, get_session
+from core.database import engine, get_session
 
-from ..models.transaction import Transaction, VirtualAccount
-from ..models.bill import Bill
-from ..models.user import User
-from ..services.payaza import verify_webhook_signature
-from ..services.payout import _notify_user, schedule_recurrence
+from models.transaction import Transaction, VirtualAccount
+from models.bill import Bill
+from models.user import User
+from services.payaza import verify_webhook_signature
+from services.payout import _notify_user, schedule_recurrence
 import logging
 import uuid
-from ..services.payaza import trigger_test_collection
-from ..models.transaction import VirtualAccount
+from services.payaza import trigger_test_collection
+from models.transaction import VirtualAccount
 import os
 from dotenv import load_dotenv
 import base64
