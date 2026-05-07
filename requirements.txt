@@ -22,5 +22,5 @@ langchain-unstructured
 pdf2image
 python-multipart
 pdfminer.six
-pi-
+pi-heif
 unstructured_inference
