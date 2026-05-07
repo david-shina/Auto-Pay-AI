@@ -1,5 +1,5 @@
 # api/authRoute.py
-from fastapi import APIRouter, Depends, HTTPException, logger
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from core.database import get_session
 from models.user import User, TelegramLinkCode
