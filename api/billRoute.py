@@ -1,5 +1,5 @@
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
-from app.core.database import  get_session
+from app.core.database import get_session
 from sqlmodel import Session
 import shutil
 from app.services.loader import PDFLoader
