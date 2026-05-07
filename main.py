@@ -1,19 +1,19 @@
 # main.py
 from fastapi import FastAPI, Request, Response
-from .api.billRoute import router
-from .api.authRoute import router as authRouter
-from .api.webHookRoute import router as webhookRouter
-from .core.database import init_db
-from .handlers import start_command, link_command, build_bill_conversation
+from api.billRoute import router
+from api.authRoute import router as authRouter
+from api.webHookRoute import router as webhookRouter
+from core.database import init_db
+from handlers import start_command, link_command, build_bill_conversation
 import logging
 from telegram import Update
 from telegram.ext import Application, CommandHandler
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 import os
-from .handlers.auth import wallet_command
+from handlers.auth import wallet_command
 import datetime
-from ..app.core.scheduler import process_scheduled_bills
+from core.scheduler import process_scheduled_bills
 
 
 load_dotenv(dotenv_path='.env')
@@ -41,7 +41,7 @@ ptb_app.add_handler(build_bill_conversation())
 async def lifespan(app: FastAPI):
     init_db()
 
-    from .core.scheduler import scheduler
+    from core.scheduler import scheduler
 
     scheduler.add_job(
         process_scheduled_bills,
