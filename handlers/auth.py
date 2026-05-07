@@ -47,7 +47,7 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     async with httpx.AsyncClient() as client:
         response = await client.post(
-            "http://localhost:8000/api/v1/auth/verify-link",
+            "https://auto-pay-ai-production.up.railway.app/api/v1/auth/verify-link",
             json={"code": code, "telegram_chat_id": chat_id}
         )
 
