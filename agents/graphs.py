@@ -1,6 +1,6 @@
 from langgraph.graph import StateGraph, END
-from state import AgentState
-from nodes import make_decision_node
+from .state import AgentState
+from .nodes import make_decision_node
 
 def build_graph():
     workflow = StateGraph(AgentState)
