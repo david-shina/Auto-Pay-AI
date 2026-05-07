@@ -6,7 +6,7 @@ from core.database import engine
 from models.bill import Bill
 from models.user import User
 from models.transaction import Transaction
-from payaza import execute_payout
+from .payaza import execute_payout
 from telegram import Bot
 import os
 from services.banks import get_bank_code1
