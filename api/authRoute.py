@@ -1,13 +1,13 @@
 # api/authRoute.py
 from fastapi import APIRouter, Depends, HTTPException, logger
 from sqlmodel import Session, select
-from app.core.database import get_session
-from app.models.user import User, TelegramLinkCode
+from .core.database import get_session
+from .models.user import User, TelegramLinkCode
 from datetime import datetime, timedelta
 from pydantic import BaseModel
 import hashlib
-from app.services.payaza import create_virtual_account
-from app.models.transaction import VirtualAccount
+from .services.payaza import create_virtual_account
+from .models.transaction import VirtualAccount
 from fastapi.logger import logger
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
