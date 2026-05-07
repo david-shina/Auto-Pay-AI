@@ -20,4 +20,4 @@ pymupdf
 langchain-community
 langchain-unstructured
 pdf2image
-
+python-multipart
