@@ -73,7 +73,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # temporary for debugging
+    allow_origins=[
+        "https://autopayaiagent.netlify.app"
+    ],  
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
