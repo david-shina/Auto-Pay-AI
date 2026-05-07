@@ -20,3 +20,4 @@ fitz
 langchain-community
 langchain-unstructured
 pdf2image
+frontend
