@@ -22,3 +22,4 @@ langchain-unstructured
 pdf2image
 python-multipart
 pdfminer.six
+pi-hief
