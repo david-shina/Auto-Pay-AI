@@ -8,7 +8,7 @@ import logging
 from . import base_loader
 from typing import Generator
 from langchain_core.documents import Document
-from app.models.bill import BillExtraction
+from models.bill import BillExtraction
 from urllib.parse import urlparse
 import requests
 import httpx
