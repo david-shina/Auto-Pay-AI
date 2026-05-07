@@ -55,7 +55,8 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "✅ *Account linked successfully!*\n\n"
             "You can now send me bills (photos, PDFs, or text) "
-            "and I'll analyze and schedule payments automatically.",
+            "and I'll analyze and schedule payments automatically.\n\n",
+            "If you want to test transcation use the name CHIBUNKEM OJIAKU"
             parse_mode="Markdown"
         )
         return
