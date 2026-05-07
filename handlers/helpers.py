@@ -1,6 +1,6 @@
 from sqlmodel import Session, select
-from .core.database import engine
-from .models.user import User
+from core.database import engine
+from models.user import User
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 EDITABLE_FIELDS = {
