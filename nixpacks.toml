@@ -1,2 +1,2 @@
 [phases.setup]
-nixPkgs = ["tesseract", "poppler_utils", "libGL", "glib"]
+nixPkgs = ["tesseract", "poppler_utils", "libGL", "glib", "tesseract-langs.eng"]
