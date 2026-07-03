@@ -320,3 +320,63 @@ def test_replay_returns_200_with_audit_breadcrumb(
         select(AuditLog).where(AuditLog.event_type == AuditEventType.WEBHOOK_REPLAY.value)
     ).all()
     assert len(rows) == 1
+
+
+def test_get_webhook_url_is_a_healthcheck_not_spa_html(client: TestClient) -> None:
+    """Regression test for the "GET on the webhook URL returns the SPA
+    shell" bug.
+
+    Background: the app has a GET /{path:path} catch-all that
+    serves the SPA's index.html for any unmatched path. This is
+    great for the SPA's hash router, but it meant that
+    `GET /webhooks/paystack` returned 200 with the SPA's HTML
+    shell — which is misleading:
+
+      - Anyone (browser, curl, Paystack dashboard "Test" button,
+        a healthcheck pinger) hitting the URL with GET would
+        see a 200 OK and think the webhook is "working", when
+        no webhook handler ran.
+      - The 405 the user saw in the logs (e.g. from a HEAD
+        request) was the only way to tell the route was
+        even registered as POST-only.
+
+    The fix: register an explicit GET handler on
+    /webhooks/paystack that returns a tiny JSON healthcheck
+    with the right method ("POST") advertised. This way the
+    URL is recognisable as the webhook endpoint and people
+    don't mistake the SPA HTML for a working webhook.
+    """
+    r = client.get("/webhooks/paystack")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json"), (
+        f"GET /webhooks/paystack must return JSON, not HTML. "
+        f"Got content-type={r.headers.get('content-type')!r}. "
+        "This was the bug: the SPA catch-all was returning "
+        "index.html, making the URL look like a working "
+        "webhook when no handler ran."
+    )
+    body = r.json()
+    assert body.get("endpoint") == "paystack_webhook"
+    assert body.get("method") == "POST"
+    assert body.get("ready") is True
+
+
+def test_head_webhook_url_returns_405() -> None:
+    """HEAD is still 405 — that's intentional.
+
+    Paystack only POSTs, so a HEAD request is not a valid
+    webhook. Returning 405 makes that explicit. We don't add
+    a HEAD handler because it would be misleading (it would
+    make the URL look fully ready for HEAD probes when the
+    real method is POST).
+    """
+    from fastapi.testclient import TestClient
+    import os
+    os.environ["TELEGRAM_BOT_TOKEN"] = ""
+    from app.main import app
+    c = TestClient(app)
+    r = c.head("/webhooks/paystack")
+    assert r.status_code == 405, (
+        f"HEAD /webhooks/paystack must remain 405, got {r.status_code}. "
+        "A HEAD handler would mask the fact that POST is the real method."
+    )

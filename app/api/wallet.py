@@ -1,24 +1,51 @@
-"""Wallet API — balance, virtual account provisioning.
+"""Wallet API — balance, virtual account provisioning, top-up,
+transaction history.
 
 Mounted at /api/v1/wallet in `app.main`.
 
-`POST /wallet/provision` is the user-facing escape hatch when signup
-could not auto-provision a DVA (Paystack business not approved for
-Dedicated NUBANs, transient provider error, etc.). It is idempotent:
-a second call after success returns the existing account.
+Four endpoints:
+  * `GET  /wallet`             — current balance (auth)
+  * `GET  /wallet/transactions` — last 20 transactions (auth)
+  * `POST /wallet/provision`   — DVA provision (auth, deprecated once
+                                   your Paystack business is approved)
+  * `POST /wallet/topup`       — start a Checkout-based top-up (auth)
+
+The top-up flow:
+  1. Client POSTs `{amount}` to /wallet/topup.
+  2. We mint a unique `reference`, persist a pending `Transaction`
+     row, call `provider.initialize_topup(...)`, return the
+     `authorization_url` for the client to open in a browser.
+  3. User pays on the Paystack-hosted page (card / bank / USSD / QR).
+  4. Paystack fires `charge.success` with `data.reference == our ref`.
+  5. Existing `_handle_charge_success` looks up the `Transaction` by
+     `provider_reference`, credits the wallet, flips status to success,
+     writes the audit row.
+
+The top-up business logic (validation, persistence, audit, metrics)
+lives in `app.services.wallet.start_topup`; this route is a thin
+adapter that turns the JSON body into a service call and translates
+service errors into HTTP responses.
 """
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.core.database import get_session
 from app.models.user import User
 from app.models.virtual_account import VirtualAccount
+from app.models.enums import (
+    AuditActor,
+    AuditEntityType,
+    AuditEventType,
+)
+from app.models.transaction import Transaction
+from app.schemas.transaction import TransactionResponse
 from app.services.audit import (
     audit_va_created,
     write_audit,
@@ -29,12 +56,19 @@ from app.services.payments import (
     PaymentProvider,
     get_payment_provider,
 )
-from app.models.enums import AuditActor, AuditEventType, AuditEntityType
+from app.services.wallet import (
+    MAX_TOPUP_NGN,
+    MIN_TOPUP_NGN,
+    TopupValidationError,
+    start_topup,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["wallet"])
 
+
+# ── Provision schemas (DVA path) ───────────────────────────────────
 
 class VirtualAccountPublic(BaseModel):
     """Wire format for the user's virtual account."""
@@ -149,3 +183,132 @@ async def provision_virtual_account(
         already_existed=False,
         message="Virtual account provisioned.",
     )
+
+
+# ── Top-up via Checkout (no DVA required) ──────────────────────────
+
+
+class TopupRequest(BaseModel):
+    """Body for `POST /wallet/topup`."""
+
+    amount: Decimal = Field(
+        ...,
+        gt=0,
+        description="Amount in NGN. Must be between 100 and 1,000,000.",
+    )
+    callback_url: Optional[str] = Field(
+        default=None,
+        description="Where to redirect the user after the Paystack page. "
+        "Defaults to a deep-link back to the dashboard / bot.",
+    )
+
+
+class TopupResponse(BaseModel):
+    """Wire format for the top-up init response."""
+
+    authorization_url: str  # Paystack-hosted Checkout page
+    reference: str  # pass to /webhooks/paystack as data.reference
+    transaction_id: int  # the pending Transaction row id
+    amount: Decimal
+    currency: str = "NGN"
+    message: str
+
+
+@router.post(
+    "/topup",
+    response_model=TopupResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a hosted top-up via Paystack Checkout",
+)
+async def topup_wallet(
+    payload: TopupRequest,
+    request: Optional[object] = None,  # noqa: ARG001  (placeholder; replace with Request if you want IP logging)
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_active_user),
+    provider: PaymentProvider = Depends(get_payment_provider),
+) -> TopupResponse:
+    """Mint a unique `reference`, persist a pending `Transaction` row,
+    call `provider.initialize_topup(...)`, return the `authorization_url`
+    for the client to open. The `charge.success` webhook credits the
+    wallet when the user completes payment.
+
+    Idempotent at the Paystack level (same reference → same session).
+    At our level, two POSTs with the same amount produce two distinct
+    `Transaction` rows (different `reference`s). That's by design —
+    the user can have multiple in-flight top-ups.
+
+    Business logic is delegated to `app.services.wallet.start_topup`;
+    this route is a thin adapter that translates HTTP errors to
+    service errors and back.
+    """
+    try:
+        result = await start_topup(
+            session,
+            user=user,
+            amount=Decimal(str(payload.amount)),
+            provider=provider,
+            callback_url=payload.callback_url,
+        )
+    except TopupValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except PaymentError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not start top-up: {exc}",
+        ) from exc
+
+    return TopupResponse(
+        authorization_url=result.authorization_url,
+        reference=result.reference,
+        transaction_id=result.transaction_id,
+        amount=result.amount,
+        currency=result.currency,
+        message=(
+            "Open the URL in a browser to complete payment. "
+            "Your wallet will be credited when Paystack confirms."
+        ),
+    )
+
+
+# ── Transaction history ────────────────────────────────────────
+
+
+@router.get(
+    "/transactions",
+    response_model=list[TransactionResponse],
+    summary="List the caller's recent transactions (last 20)",
+)
+def list_transactions(
+    limit: int = Query(20, ge=1, le=100),
+    type: Optional[str] = Query(
+        None,
+        description="Filter by transaction type ('credit' or 'debit')",
+    ),
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_active_user),
+) -> list[Transaction]:
+    """Return the caller's most recent transactions, newest first.
+
+    Query params:
+      * `limit` (default 20, max 100) — how many rows to return.
+      * `type`  (optional) — filter to just `credit` (top-ups) or
+        just `debit` (bill payments + refunds).
+
+    Mirrors the bot's `/transactions` command so the web dashboard
+    sees the same data.
+    """
+    from app.models.transaction import Transaction
+    from sqlalchemy import select as _sa_select
+
+    q = _sa_select(Transaction).where(Transaction.user_id == user.id)
+    if type:
+        # Normalize to the enum value (lowercase, e.g. "credit").
+        q = q.where(Transaction.type == type.lower())
+    q = q.order_by(Transaction.created_at.desc()).limit(limit)
+    # SQLModel 0.0.22 quirk: `session.exec(select(Model)).all()` returns
+    # a list of Row tuples. Use `scalars()` to get the model instances.
+    rows = session.execute(q).scalars().all()
+    return rows

@@ -46,6 +46,11 @@ from app.services.payments import (
     PaymentError,
     PaymentProvider,
 )
+from app.services.name_match import names_match
+# Note: `notify_refund` is imported lazily inside `_refund_on_failure`
+# to avoid a circular import. `app.services.telegram` imports the
+# bot handlers (which import `execute_payout` from this module) at
+# module-load time.
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +84,7 @@ async def execute_payout(
     *,
     bill_id: int,
     provider: PaymentProvider,
+    actor: "AuditActor" = AuditActor.USER,
 ) -> PayoutResult:
     """Process a payout for `bill_id`.
 
@@ -145,6 +151,7 @@ async def execute_payout(
             bill_id=bill.id,
             reason=f"insufficient_balance (shortfall={shortfall})",
             retry_count=bill.retry_count,
+            actor=actor,
         )
         raise HTTPException(
             status_code=status.HTTP_402_PAYMENT_REQUIRED,
@@ -181,11 +188,17 @@ async def execute_payout(
         bill_id=bill.id,
         provider_reference=reference,
         new_balance=float(user.balance) - float(total_charge),  # pre-debit balance; real update follows
+        actor=actor,
     )
 
     # ── 6. Resolve account + create transfer recipient ─────────────
     if not bill.account_number or not bill.bank_code:
-        _refund_on_failure(session, user, bill, debit, "missing account_number or bank_code")
+        await _refund_on_failure(
+            session, user, bill, debit,
+            "missing account_number or bank_code",
+            actor=actor,
+        )
+        _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="Bill has no payout account configured.",
@@ -196,20 +209,38 @@ async def execute_payout(
             account_number=bill.account_number, bank_code=bill.bank_code
         )
     except InvalidAccount as exc:
-        _refund_on_failure(session, user, bill, debit, f"invalid_account: {exc}")
+        await _refund_on_failure(
+            session, user, bill, debit, f"invalid_account: {exc}", actor=actor,
+        )
+        _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Account could not be resolved: {exc}",
         ) from exc
 
     # If we have a stored account name, verify it matches the resolved
-    # one (defense against typos / account swaps).
-    if bill.vendor_name and resolved.account_name.upper() != bill.vendor_name.upper():
-        # Not a hard fail — the vendor name in the bill is user-entered
-        # and may differ from the bank's "official" name. Log only.
-        logger.warning(
-            "Account name mismatch for bill %d: stored=%r resolved=%r",
-            bill.id, bill.vendor_name, resolved.account_name,
+    # one (defense against typos / account swaps). A mismatch means
+    # the user typed the wrong vendor for this account, or the account
+    # at this number now belongs to a different entity. Either way
+    # we should not transfer the user's money — refund + 422.
+    if bill.vendor_name and not names_match(bill.vendor_name, resolved.account_name):
+        await _refund_on_failure(
+            session,
+            user,
+            bill,
+            debit,
+            f"name_mismatch: bill={bill.vendor_name!r} resolved={resolved.account_name!r}",
+            actor=actor,
+        )
+        _commit_or_warn(session)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Account name mismatch: the bill is for {bill.vendor_name!r} "
+                f"but account {bill.account_number} at bank {bill.bank_code} "
+                f"is registered to {resolved.account_name!r}. "
+                f"Please edit the bill vendor or check the account number."
+            ),
         )
 
     try:
@@ -219,13 +250,19 @@ async def execute_payout(
             account_name=resolved.account_name,
         )
     except AccountNameMismatch as exc:
-        _refund_on_failure(session, user, bill, debit, f"name_mismatch: {exc}")
+        await _refund_on_failure(
+            session, user, bill, debit, f"name_mismatch: {exc}", actor=actor,
+        )
+        _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Account name mismatch: {exc}",
         ) from exc
     except PaymentError as exc:
-        _refund_on_failure(session, user, bill, debit, f"recipient_failed: {exc}")
+        await _refund_on_failure(
+            session, user, bill, debit, f"recipient_failed: {exc}", actor=actor,
+        )
+        _commit_or_warn(session)
         raise
 
     # ── 7. Initiate the transfer ───────────────────────────────────
@@ -238,13 +275,20 @@ async def execute_payout(
         )
     except InsufficientFunds as exc:
         # Provider says our MERCHANT balance is too low. Refund user.
-        _refund_on_failure(session, user, bill, debit, f"provider_insufficient_funds: {exc}")
+        await _refund_on_failure(
+            session, user, bill, debit,
+            f"provider_insufficient_funds: {exc}", actor=actor,
+        )
+        _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Provider temporarily out of funds. Please retry later.",
         ) from exc
     except PaymentError as exc:
-        _refund_on_failure(session, user, bill, debit, f"transfer_failed: {exc}")
+        await _refund_on_failure(
+            session, user, bill, debit, f"transfer_failed: {exc}", actor=actor,
+        )
+        _commit_or_warn(session)
         raise
 
     # ── 8. Commit wallet + mark as processing (success) ───────────
@@ -267,12 +311,26 @@ async def execute_payout(
 
 # ── Refund helper ───────────────────────────────────────────────────
 
-def _refund_on_failure(
+def _commit_or_warn(session: Session) -> None:
+    """Commit the current transaction and swallow commit errors as
+    warnings. Used by the failure branches of `execute_payout` so the
+    audit row + bill status changes persist even when we raise an
+    HTTPException immediately after. Callers (FastAPI endpoint, bot
+    handler, scheduler) can roll back their own outer transaction
+    safely — the audit is already durable."""
+    try:
+        session.commit()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("commit after refund failed (audit may be lost): %s", exc)
+
+
+async def _refund_on_failure(
     session: Session,
     user: User,
     bill: Bill,
     debit: Transaction,
     reason: str,
+    actor: AuditActor = AuditActor.USER,
 ) -> None:
     """Mark the debit failed, increment retry, set bill back to
     scheduled-or-failed. The user's balance is *not* debited in this
@@ -295,8 +353,16 @@ def _refund_on_failure(
         user_id=user.id,
         bill_id=bill.id,
         reason=reason,
+        actor=actor,
         retry_count=bill.retry_count,
     )
+
+    # Best-effort Telegram notification of the refund. notify_refund
+    # swallows its own errors so the payout flow continues even if
+    # the bot is offline or the user isn't linked. Imported lazily
+    # to avoid a circular import.
+    from app.services.telegram import notify_refund
+    await notify_refund(user=user, transaction=debit)
 
 
 # ── Recurrence helper (used after a successful payout) ──────────────

@@ -1,4 +1,5 @@
-"""Telegram bot auth-flow handlers: /start, /link, /wallet, /unlink.
+"""Telegram bot auth-flow handlers: /start, /link, /wallet, /unlink,
+/bills, /transactions, /help.
 
 The /link command is the user-facing half of the account-link flow.
 The web dashboard generates a short-lived code (see
@@ -42,7 +43,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "1. Sign up at the web dashboard.\n"
         "2. Open Settings → Link Telegram — copy the 6-char code.\n"
         f"3. Send it here: `/link {chr(60)}CODE{chr(62)}`\n\n"
-        "Once linked, send me a bill whenever a payment is due."
+        "Once linked, send me a bill whenever a payment is due.\n\n"
+        "*Try:* `/topup`, `/schedule`, `/wallet`, `/bills`, "
+        "`/transactions`, `/help`"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -184,16 +187,24 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     va = get_user_va(user)
+    balance = float(user.balance)
     if va is None:
+        # No DVA — show the balance, then point the user at /topup
+        # (the bot's hosted-Checkout flow, which works without a
+        # DVA). Users with a DVA provisioned will see their account
+        # number below.
         await update.message.reply_text(
-            "⚠️ *No virtual account found.*\n\n"
-            "Ask the web dashboard to provision one (Settings → Wallet), "
-            "or ask an admin to run `POST /api/v1/wallet/provision` for you.",
+            f"💼 *Your AutoPay Wallet*\n\n"
+            f"Balance: ₦{balance:,.2f}\n\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"*No virtual account provisioned.*\n"
+            f"Top up your wallet with `/topup` (card / bank / USSD via\n"
+            f"Paystack Checkout) — no DVA needed.\n\n"
+            f"_See `/transactions` for your recent activity._",
             parse_mode="Markdown",
         )
         return
 
-    balance = float(user.balance)
     await update.message.reply_text(
         f"💼 *Your AutoPay Wallet*\n\n"
         f"Balance: ₦{balance:,.2f}\n\n"
@@ -203,7 +214,9 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         f"Account: `{escape_md(va.account_number or 'N/A')}`\n"
         f"Name: `{escape_md(va.account_name or 'N/A')}`\n"
         f"━━━━━━━━━━━━━━━\n\n"
-        "_Save this as a beneficiary in your bank app for quick top-ups._",
+        f"Or top up instantly with `/topup` (card / USSD / QR).\n"
+        f"_Save this DVA as a beneficiary in your bank app for "
+        f"quick top-ups._",
         parse_mode="Markdown",
     )
 
@@ -224,15 +237,17 @@ async def bills_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     with session_scope() as session:
         from sqlalchemy import select as _sa_select
-        rows = session.exec(
+        rows = session.execute(
             _sa_select(Bill)
             .where(Bill.user_id == user.id)
             .order_by(Bill.due_date.asc())
             .limit(20)
-        ).all()
+        ).scalars().all()
 
     if not rows:
-        await update.message.reply_text("📭 You have no bills yet. Send me a bill to get started.")
+        await update.message.reply_text(
+            "📭 You have no bills yet. Send me a bill, or `/schedule` a recurring one."
+        )
         return
 
     lines = ["📋 *Your recent bills*\n"]
@@ -241,10 +256,105 @@ async def bills_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             amount = f"₦{float(b.amount):,.2f}"
         except (TypeError, ValueError):
             amount = "N/A"
+        recur_marker = " 🔁" if getattr(b, "is_recurring", False) else ""
         lines.append(
-            f"• *#{b.id}* `{escape_md(b.vendor_name)}` — {amount} "
+            f"• *#{b.id}* `{escape_md(b.vendor_name)}`{recur_marker} — {amount} "
             f"_(status: {b.status}, due {b.due_date.date() if b.due_date else '?'})_"
         )
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+
+# ── /transactions ───────────────────────────────────────────────────
+
+
+async def transactions_command(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Show the user's last 20 transactions (credits + debits)."""
+    from app.models.enums import TransactionType
+
+    chat_id = str(update.effective_chat.id)
+    user = get_linked_user(chat_id)
+    if user is None:
+        await update.message.reply_text(
+            "🔒 Link your account first with `/link YOUR_CODE`",
+            parse_mode="Markdown",
+        )
+        return
+
+    with session_scope() as session:
+        from sqlalchemy import select as _sa_select
+
+        from app.models.transaction import Transaction
+
+        # SQLModel 0.0.22 quirk: `session.exec(select(Model)).all()`
+        # returns a list of Row tuples. Use `scalars()` to get the
+        # model instances.
+        rows = (
+            session.execute(
+                _sa_select(Transaction)
+                .where(Transaction.user_id == user.id)
+                .order_by(Transaction.created_at.desc())
+                .limit(20)
+            )
+            .scalars()
+            .all()
+        )
+
+    if not rows:
+        await update.message.reply_text(
+            "📭 No transactions yet. Top up your wallet to get started.",
+            parse_mode="Markdown",
+        )
+        return
+
+    # Header with current balance so the user has context
+    balance = float(user.balance)
+    lines = [
+        "💳 *Your recent transactions*\n",
+        f"_Current balance: ₦{balance:,.2f}_\n",
+    ]
+
+    for t in rows:
+        # Sign by type
+        if t.type == TransactionType.CREDIT.value:
+            sign = "+"
+            emoji = "🟢"
+        else:
+            sign = "−"
+            emoji = "🔴"
+
+        try:
+            amount = f"₦{float(t.amount):,.2f}"
+        except (TypeError, ValueError):
+            amount = "N/A"
+
+        # Build a short label
+        if t.type == TransactionType.CREDIT.value:
+            label = t.narration or "Top-up"
+        else:
+            # Debit — try to surface the vendor name via the bill FK
+            label = t.narration or (f"Bill #{t.bill_id}" if t.bill_id else "Payout")
+
+        # Date — show YYYY-MM-DD
+        when = t.created_at.date().isoformat() if t.created_at else "?"
+
+        # Status indicator
+        status = t.status
+        if status == "success":
+            status_mark = "✅"
+        elif status == "failed":
+            status_mark = "❌"
+        elif status == "reversed":
+            status_mark = "↩️"
+        else:
+            status_mark = "⏳"
+
+        lines.append(
+            f"{emoji} {sign}{amount}  {status_mark} `{escape_md(label)}`\n"
+            f"    _{when} · {status}_"
+        )
+
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 
@@ -257,7 +367,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/link `<code>` — link your web account\n"
         "/unlink — disconnect your Telegram\n"
         "/wallet — show balance and DVA details\n"
+        "/topup — add money to your wallet (card / USSD / QR)\n"
+        "/schedule — set up a future-dated or recurring bill\n"
         "/bills — list recent bills\n"
+        "/transactions — show recent credits and debits\n"
         "/cancel — cancel the current conversation\n\n"
         "Just send a bill photo, PDF, or text to pay a bill."
     )

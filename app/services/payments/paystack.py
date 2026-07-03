@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.services.payments.base import (
     PaymentProvider,
     ResolvedAccount,
+    TopupInit,
     TransferResult,
     VirtualAccountData,
     WebhookEvent,
@@ -243,6 +244,50 @@ class PaystackProvider(PaymentProvider):
             provider_transfer_id=str(data["id"]),
             status=str(data.get("status") or "pending"),
             raw_response=data,
+        )
+
+    # ── Top-up via Checkout (no DVA required) ─────────────────────
+
+    async def initialize_topup(
+        self,
+        *,
+        amount_kobo: int,
+        email: str,
+        reference: str,
+        callback_url: Optional[str] = None,
+    ) -> TopupInit:
+        """Start a hosted Checkout session. The user is redirected to
+        `authorization_url`, pays via card / bank / USSD / QR, and on
+        completion Paystack fires `charge.success` with `reference` as
+        `data.reference` — our existing `_handle_charge_success` looks
+        up a Transaction row by that reference and credits the wallet.
+        """
+        payload: dict[str, Any] = {
+            "amount": amount_kobo,
+            "email": email,
+            "reference": reference,
+            "currency": "NGN",
+        }
+        if callback_url:
+            payload["callback_url"] = callback_url
+
+        data = await self._request(
+            "POST",
+            "/transaction/initialize",
+            json_body=payload,
+        )
+        authorization_url = str(data.get("authorization_url") or "")
+        access_code = data.get("access_code")
+        if not authorization_url:
+            raise ProviderError(
+                "Paystack did not return an authorization_url",
+                provider="paystack",
+            )
+        return TopupInit(
+            authorization_url=authorization_url,
+            reference=reference,
+            provider=self.name,
+            access_code=str(access_code) if access_code else None,
         )
 
     # ── Webhook signature + parsing ─────────────────────────────────

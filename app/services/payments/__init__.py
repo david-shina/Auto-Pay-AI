@@ -7,6 +7,7 @@ selected by `settings.payment_provider`.
 from app.services.payments.base import (
     PaymentProvider,
     ResolvedAccount,
+    TopupInit,
     TransferResult,
     VirtualAccountData,
     WebhookEvent,
@@ -34,6 +35,7 @@ __all__ = [
     "PaymentProvider",
     "ProviderError",
     "ResolvedAccount",
+    "TopupInit",
     "TransferResult",
     "VirtualAccountData",
     "WebhookEvent",

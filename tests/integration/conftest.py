@@ -85,7 +85,12 @@ def _truncate_all() -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_db():
-    """Truncate every table before each integration test."""
+    """Truncate every table before and after each integration test.
+
+    Autouse so every integration test gets a clean DB without having
+    to list this fixture in its signature. (The leading underscore is
+    a historical artifact.)
+    """
     _truncate_all()
     yield
     _truncate_all()
@@ -161,27 +166,114 @@ class _StubPaystack:
     def verify_webhook_signature(self, **_) -> bool:
         return True
 
-    async def parse_webhook(self, **kwargs):
+    async def initialize_topup(self, **kwargs):
+        """Stub for hosted Checkout top-up. Records the call and
+        returns a fake authorization_url."""
+        from app.services.payments.base import TopupInit
+
+        self.calls.append(("initialize_topup", kwargs))
+        type(self)._counter += 1
+        return TopupInit(
+            authorization_url=f"https://checkout.paystack.com/test_{type(self)._counter}",
+            reference=kwargs["reference"],
+            provider="paystack",
+            access_code=f"ac_test_{type(self)._counter}",
+        )
+
+    async def parse_webhook(self, *, raw_body: bytes, signature_header: str, **kwargs):
+        """Stub parse_webhook that actually verifies the signature and
+        parses the real body — same as the real provider, but without
+        making the network round-trip. This lets webhook tests verify
+        the full pipeline (signature → parse → dedup → dispatch →
+        credit) end-to-end against the real handler code."""
+        import hashlib
+        import hmac
+        import json as _json
+
+        from app.core.config import settings
         from app.services.payments.base import WebhookEvent
+
+        # Verify signature using the test secret
+        expected = hmac.new(
+            settings.paystack_secret_key.encode(), raw_body, hashlib.sha512
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature_header or ""):
+            from app.services.payments import WebhookSignatureError
+            raise WebhookSignatureError(
+                "Invalid signature", provider="paystack"
+            )
+
+        # Parse the body like the real provider
+        try:
+            payload = _json.loads(raw_body.decode("utf-8"))
+        except (_json.JSONDecodeError, UnicodeDecodeError) as exc:
+            from app.services.payments import WebhookSignatureError
+            raise WebhookSignatureError(
+                f"Webhook body is not valid JSON: {exc}", provider="paystack"
+            ) from exc
+
+        event_name = str(payload.get("event") or "")
+        data = payload.get("data") or {}
+        provider_ref = ""
+        amount_kobo = None
+        if event_name == "charge.success":
+            provider_ref = str(data.get("reference") or "")
+            amount_kobo = int(data.get("amount") or 0)
+        elif event_name in ("transfer.success", "transfer.failed", "transfer.reversed"):
+            provider_ref = str(data.get("reference") or "")
+            amount_kobo = int(data.get("amount") or 0)
+        else:
+            provider_ref = str(data.get("reference") or data.get("id") or "")
+
+        event_id = str(
+            payload.get("id")
+            or payload.get("event_id")
+            or hashlib.sha256(raw_body).hexdigest()
+        )
+
         return WebhookEvent(
-            event_type=kwargs.get("event_type", "charge.success"),
-            provider_reference=kwargs.get("reference", "x"),
-            event_id=kwargs.get("event_id", f"evt_{id(self)}"),
+            event_type=event_name,
+            provider_reference=provider_ref,
+            event_id=event_id,
+            amount_kobo=amount_kobo,
+            raw=payload,
         )
 
 
 @pytest.fixture
-def stub_provider():
-    """A fresh stub for each test. Overrides `get_payment_provider`."""
+def stub_provider(monkeypatch):
+    """A fresh stub for each test. Overrides `get_payment_provider`.
+
+    Patches TWO surfaces:
+      1. FastAPI dependency injection (for endpoints that use
+         `Depends(get_payment_provider)`).
+      2. The function in the `app.services.payments` package module
+         (for the scheduler, which calls `get_payment_provider()`
+         directly without going through DI). All downstream imports
+         (auth, bills, wallet, scheduler) bind the same function
+         object at import time, so replacing it on the source
+         module propagates to every caller.
+    """
     from app.api import auth as auth_module
     from app.api import bills as bills_module
+    from app.api import wallet as wallet_module
+    from app.services import payments as _payments_module
 
     _StubPaystack._counter = 0
     stub = _StubPaystack()
     stub.calls = []
 
+    # 1. FastAPI DI overrides
     app.dependency_overrides[auth_module.get_payment_provider] = lambda: stub
     app.dependency_overrides[bills_module.get_payment_provider] = lambda: stub
+    app.dependency_overrides[wallet_module.get_payment_provider] = lambda: stub
+
+    # 2. Function-level patch (so the scheduler uses the stub)
+    monkeypatch.setattr(
+        _payments_module, "get_payment_provider", lambda: stub
+    )
+
     yield stub
+
     app.dependency_overrides.clear()
 

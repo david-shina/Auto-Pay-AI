@@ -35,6 +35,7 @@ from app.schemas.bill import (
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
 from app.services.date_parser import parse_bill_due_date
+from app.core.metrics import record_bill_created, record_bill_paid, record_payout
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
 from app.services.payout import execute_payout

@@ -116,10 +116,11 @@ def audit_wallet_debit(
     bill_id: int | None,
     provider_reference: str,
     new_balance: float,
+    actor: AuditActor = AuditActor.SYSTEM,
 ) -> AuditLog:
     return write_audit(
         session,
-        actor=AuditActor.SYSTEM,
+        actor=actor,
         event_type=AuditEventType.PAYOUT_ATTEMPTED,
         user_id=user_id,
         entity_type=AuditEntityType.TRANSACTION,
@@ -139,10 +140,11 @@ def audit_payout_succeeded(
     user_id: int,
     bill_id: int,
     provider_reference: str,
+    actor: AuditActor = AuditActor.WEBHOOK,
 ) -> AuditLog:
     return write_audit(
         session,
-        actor=AuditActor.WEBHOOK,
+        actor=actor,
         event_type=AuditEventType.PAYOUT_SUCCEEDED,
         user_id=user_id,
         entity_type=AuditEntityType.BILL,
@@ -158,10 +160,11 @@ def audit_payout_failed(
     bill_id: int,
     reason: str,
     retry_count: int,
+    actor: AuditActor = AuditActor.SYSTEM,
 ) -> AuditLog:
     return write_audit(
         session,
-        actor=AuditActor.SYSTEM,
+        actor=actor,
         event_type=AuditEventType.PAYOUT_FAILED,
         user_id=user_id,
         entity_type=AuditEntityType.BILL,

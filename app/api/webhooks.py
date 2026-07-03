@@ -29,12 +29,14 @@ from app.services.audit import (
     audit_wallet_credit,
     write_audit,
 )
+from app.core.metrics import record_topup_credited
 from app.services.payments import (
     PaymentProvider,
     WebhookSignatureError,
     get_payment_provider,
 )
 from app.services.payout import confirm_payout
+from app.services.telegram import notify_credit, notify_debit, notify_refund
 
 logger = logging.getLogger(__name__)
 
@@ -99,9 +101,9 @@ async def paystack_webhook(
     )
 
     if event.event_type == "charge.success":
-        _handle_charge_success(session, event)
+        await _handle_charge_success(session, event)
     elif event.event_type in ("transfer.success", "transfer.failed", "transfer.reversed"):
-        _handle_transfer_update(session, event)
+        await _handle_transfer_update(session, event)
     elif event.event_type == "dedicatedaccount.assign.success":
         _handle_dva_assigned(session, event)
     else:
@@ -126,7 +128,7 @@ async def paystack_webhook(
 
 # ── Handlers ────────────────────────────────────────────────────────
 
-def _handle_charge_success(session: Session, event) -> None:
+async def _handle_charge_success(session: Session, event) -> None:
     """User's VA received money. Credit their wallet and update txn.
 
     Idempotent: a second charge.success for the same reference is a
@@ -137,9 +139,9 @@ def _handle_charge_success(session: Session, event) -> None:
         logger.warning("charge.success with no reference: %s", event.raw)
         return
 
-    txn = session.exec(
+    txn = session.execute(
         select(Transaction).where(Transaction.provider_reference == event.provider_reference)
-    ).first()
+    ).scalar_one_or_none()
     if txn is None:
         # No matching transaction — the top-up arrived before our app
         # created a row. Log and skip.
@@ -178,23 +180,72 @@ def _handle_charge_success(session: Session, event) -> None:
         provider_reference=event.provider_reference,
         new_balance=float(user.balance),
     )
+    # Metrics: count the credit. Source = "checkout" if the reference
+    # starts with "topup_", "dva" if it matches a virtual account
+    # pattern, else "manual" / unknown.
+    if event.provider_reference.startswith("topup_"):
+        record_topup_credited(source="checkout")
+    else:
+        record_topup_credited(source="dva")
     session.commit()
+    session.refresh(user)
+    session.refresh(txn)
+
+    # Best-effort Telegram notification. notify_credit swallows its
+    # own errors (Telegram rate-limits, bot offline, etc.) so this
+    # call never blocks the webhook.
+    await notify_credit(user=user, transaction=txn)
 
 
-def _handle_transfer_update(session: Session, event) -> None:
+async def _handle_transfer_update(session: Session, event) -> None:
     """Our outbound transfer completed / failed / was reversed."""
     success = event.event_type == "transfer.success"
     failure_reason: Optional[str] = None
     if not success:
         failure_reason = event.event_type  # "transfer.failed" | "transfer.reversed"
 
-    confirm_payout(
+    payout_result = confirm_payout(
         session,
         provider_reference=event.provider_reference,
         success=success,
         failure_reason=failure_reason,
     )
     session.commit()
+
+    # Best-effort Telegram notification. We only fire this if the
+    # payout actually changed state (confirm_payout returns None
+    # for no-ops like unknown references or already-reconciled
+    # transactions). Refresh user + txn so the notifier sees the
+    # new balance.
+    if payout_result is not None and payout_result.success is True:
+        # Look up the now-reconciled txn so we can hand it to the
+        # notifier (which formats amount / narration / fee from it).
+        from app.models.transaction import Transaction
+        from sqlalchemy import select as _sa_select
+
+        txn = session.execute(
+            _sa_select(Transaction).where(
+                Transaction.provider_reference == event.provider_reference
+            )
+        ).scalar_one_or_none()
+        if txn is not None:
+            user = session.get(User, txn.user_id)
+            if user is not None:
+                await notify_debit(user=user, transaction=txn)
+    elif payout_result is not None and payout_result.success is False:
+        # Refund path: the user's balance was credited back.
+        from app.models.transaction import Transaction
+        from sqlalchemy import select as _sa_select
+
+        txn = session.execute(
+            _sa_select(Transaction).where(
+                Transaction.provider_reference == event.provider_reference
+            )
+        ).scalar_one_or_none()
+        if txn is not None:
+            user = session.get(User, txn.user_id)
+            if user is not None:
+                await notify_refund(user=user, transaction=txn)
 
 
 def _handle_dva_assigned(session: Session, event) -> None:

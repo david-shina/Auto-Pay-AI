@@ -50,3 +50,7 @@ pg_data/
 
 
 app/core/config.py
+
+uvi.err
+test.ipynb
+graphify-out/cache

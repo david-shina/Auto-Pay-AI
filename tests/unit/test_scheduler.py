@@ -21,14 +21,92 @@ from app.models.enums import AuditActor, AuditEventType, BillStatus
 from app.services.audit import write_audit
 
 
+# ── Stub provider ───────────────────────────────────────────────────
+# The scheduler calls `get_payment_provider()` to fetch a real provider
+# at the moment of payout. The test environment doesn't have a real
+# Paystack key, so we override the factory to return a stub. The stub
+# resolves accounts, creates transfer recipients, and initiates
+# transfers with no network calls.
+
+class _StubProvider:
+    """In-memory provider that records every call."""
+    name = "paystack"
+    calls: list[tuple[str, dict]] = []
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def resolve_account(self, **kwargs):
+        from app.services.payments.base import ResolvedAccount
+        self.calls.append(("resolve_account", kwargs))
+        return ResolvedAccount(
+            account_number=kwargs["account_number"],
+            account_name="VENDOR NAME",
+            bank_code=kwargs["bank_code"],
+        )
+
+    async def create_transfer_recipient(self, **kwargs):
+        self.calls.append(("create_transfer_recipient", kwargs))
+        return "RCP_test"
+
+    async def initiate_transfer(self, **kwargs):
+        from app.services.payments.base import TransferResult
+        self.calls.append(("initiate_transfer", kwargs))
+        return TransferResult(
+            provider_reference=kwargs["reference"],
+            provider_transfer_id="99",
+            status="pending",
+        )
+
+    def verify_webhook_signature(self, **kwargs) -> bool:
+        return True
+
+    async def parse_webhook(self, **kwargs):
+        from app.services.payments.base import WebhookEvent
+        return WebhookEvent(
+            event_type=kwargs.get("event_type", "charge.success"),
+            provider_reference=kwargs.get("reference", "x"),
+            event_id=kwargs.get("event_id", f"evt_{id(self)}"),
+        )
+
+    async def initialize_topup(self, **kwargs):
+        from app.services.payments.base import TopupInit
+        return TopupInit(
+            authorization_url="https://checkout.paystack.com/test",
+            reference=kwargs["reference"],
+        )
+
+    async def create_customer(self, **kwargs):
+        return "CUS_test"
+
+    async def create_virtual_account(self, **kwargs):
+        from app.services.payments.base import VirtualAccountData
+        return VirtualAccountData(
+            account_number="0000000000",
+            account_name="Test",
+            bank_name="GTBank",
+            bank_code="058",
+            provider_reference="ref_test",
+            provider="paystack",
+        )
+
+
 @pytest.fixture(autouse=True)
-def _scheduler_lifecycle():
-    """Make sure the scheduler is stopped after every test."""
-    yield
+def _scheduler_lifecycle(monkeypatch):
+    """Stop the scheduler + override get_payment_provider for every test."""
+    stub = _StubProvider()
+    # The scheduler's helper `_async_autopay` does
+    # `from app.services.payments import get_payment_provider` and calls
+    # it. Patching the source module's name is the cleanest hook.
+    monkeypatch.setattr(
+        "app.services.payments.get_payment_provider",
+        lambda: stub,
+    )
+    yield stub
     stop_scheduler()
 
 
-def test_scheduler_starts_and_stops() -> None:
+def test_scheduler_starts_and_stops(_scheduler_lifecycle) -> None:
     assert get_scheduler() is None
     start_scheduler()
     assert get_scheduler() is not None
@@ -37,7 +115,7 @@ def test_scheduler_starts_and_stops() -> None:
     assert get_scheduler() is None
 
 
-def test_scheduler_is_idempotent() -> None:
+def test_scheduler_is_idempotent(_scheduler_lifecycle) -> None:
     start_scheduler()
     s1 = get_scheduler()
     start_scheduler()
@@ -46,12 +124,16 @@ def test_scheduler_is_idempotent() -> None:
     stop_scheduler()
 
 
-def test_process_scheduled_bills_picks_up_due_bills(session) -> None:
+def test_process_scheduled_bills_picks_up_due_bills(session, _scheduler_lifecycle) -> None:
     """A bill with `status='scheduled'` and `due_date <= now` should be
-    re-evaluated by the agent and (if pay_now) flipped to 'pending'."""
+    auto-paid: re-evaluated → PAY_NOW → execute_payout() →
+    bill status goes to `processing` (the webhook would flip to
+    `paid` in production, but we don't fire webhooks in unit tests)."""
     from app.core.database import session_scope
     from app.core.security import hash_password
     from app.models.user import User
+
+    stub = _scheduler_lifecycle
 
     with session_scope() as s:
         user = User(
@@ -86,11 +168,18 @@ def test_process_scheduled_bills_picks_up_due_bills(session) -> None:
 
     with session_scope() as s:
         bill = s.get(Bill, bill_id)
-        # The agent should have decided pay_now and flipped status to pending
-        assert bill.status == BillStatus.PENDING.value
+        # The auto-pay should have flipped status to `processing`
+        # (or `paid` if a webhook fired, but we don't have a webhook here).
+        assert bill.status == BillStatus.PROCESSING.value
+        # The stub's resolve_account + create_transfer_recipient +
+        # initiate_transfer should have all been called.
+        called = [c[0] for c in stub.calls]
+        assert "resolve_account" in called
+        assert "create_transfer_recipient" in called
+        assert "initiate_transfer" in called
 
 
-def test_process_recurring_bills_spawns_next_occurrence(session) -> None:
+def test_process_recurring_bills_spawns_next_occurrence(session, _scheduler_lifecycle) -> None:
     from app.core.database import session_scope
     from app.core.security import hash_password
     from app.models.user import User

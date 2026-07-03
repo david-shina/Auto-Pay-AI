@@ -2,15 +2,18 @@
 
 - /healthz  liveness: process is up
 - /readyz   readiness: dependencies (DB) are reachable
-- /         banner: returns app version + env
+- /metrics  Prometheus scrape endpoint (no auth; protect via network policy)
+
+The root path `/` is owned by the SPA in `app.main:serve_index` —
+this router deliberately does not register a `/` route so the
+SPA can take over without conflict.
 """
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sqlalchemy import text
 from sqlmodel import Session
 
-from app import __version__
-from app.core.config import settings
 from app.core.database import get_session
 
 router = APIRouter(tags=["health"])
@@ -36,10 +39,15 @@ def readyz(session: Session = Depends(get_session)) -> JSONResponse:
         )
 
 
-@router.get("/", summary="App banner")
-def banner() -> dict:
-    return {
-        "app": settings.app_name,
-        "version": __version__,
-        "environment": settings.environment,
-    }
+@router.get("/metrics", summary="Prometheus metrics scrape endpoint")
+def metrics() -> Response:
+    """Exposes the registered `prometheus_client` collectors in
+    text/plain exposition format. Scrape target for Prometheus.
+
+    NOTE: this route is intentionally unauthenticated. In production,
+    restrict access at the network layer (Kubernetes NetworkPolicy,
+    firewall rules, or run the scraper as a sidecar). Do NOT expose
+    `/metrics` to the public internet — it leaks request volume and
+    business event rates.
+    """
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
