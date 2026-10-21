@@ -395,6 +395,10 @@ def list_transactions(
     q = _sa_select(Transaction).where(Transaction.user_id == user.id)
     if type:
         q = q.where(Transaction.type == type.lower())
-    q = q.order_by(Transaction.created_at.desc()).limit(limit)
+    # `id` breaks ties. `created_at` is stamped from the client clock, and
+    # two rows written within the same clock tick get the same value - the
+    # DB then returns tied rows in arbitrary order, which makes paging
+    # non-deterministic. The id is monotonic, so it is a stable tiebreaker.
+    q = q.order_by(Transaction.created_at.desc(), Transaction.id.desc()).limit(limit)
     rows = session.execute(q).scalars().all()
     return rows

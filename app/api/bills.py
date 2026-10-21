@@ -218,7 +218,10 @@ def list_bills(
     q = select(Bill).where(Bill.user_id == user.id)
     if status_filter:
         q = q.where(Bill.status == status_filter)
-    q = q.order_by(Bill.due_date.asc())
+    # `id` breaks ties: several bills commonly share a due date, and
+    # without a tiebreaker the DB returns equal-date rows in arbitrary
+    # order.
+    q = q.order_by(Bill.due_date.asc(), Bill.id.asc())
     rows = session.exec(q).all()
     return [BillResponse.model_validate(r) for r in rows]
 
