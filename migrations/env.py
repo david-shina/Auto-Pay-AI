@@ -10,10 +10,10 @@ from sqlalchemy import engine_from_config, pool
 
 # Import the app's Base + Settings so autogenerate sees the ORM models
 from sqlmodel import SQLModel
-from app.core.config import settings
 
 # Import all models so SQLModel.metadata is populated
-from app import models  # noqa: F401
+from app import models
+from app.core.config import settings
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)

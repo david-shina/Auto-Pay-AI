@@ -3,7 +3,7 @@
 These run with no external dependencies.
 """
 from app import __version__
-from app.core.config import get_settings, Settings
+from app.core.config import Settings, get_settings
 
 
 def test_settings_load() -> None:

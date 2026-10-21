@@ -9,16 +9,15 @@ and short-circuit the second one with a 200.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
-from sqlalchemy import BigInteger, Column, DateTime, Index, String, UniqueConstraint
+from sqlalchemy import BigInteger, Column, DateTime, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
 class WebhookEvent(SQLModel, table=True):
     __tablename__ = "webhook_events"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )

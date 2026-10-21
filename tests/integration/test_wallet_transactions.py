@@ -4,13 +4,11 @@ from __future__ import annotations
 import time
 from decimal import Decimal
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select as sa_select
 
 from app.core.database import session_scope
 from app.models.transaction import Transaction
-from app.models.enums import TransactionStatus, TransactionType
 
 
 def _signup(c: TestClient) -> tuple[str, int]:

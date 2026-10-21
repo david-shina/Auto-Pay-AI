@@ -38,7 +38,7 @@ from app.services.date_parser import parse_bill_due_date
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
 from app.services.payout import execute_payout
-from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bills"])

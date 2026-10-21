@@ -7,7 +7,6 @@ this account; `account_number` is what users actually transfer to.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import BigInteger, Column, ForeignKey, String
 from sqlmodel import Field, SQLModel
@@ -16,7 +15,7 @@ from sqlmodel import Field, SQLModel
 class VirtualAccount(SQLModel, table=True):
     __tablename__ = "virtual_accounts"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )
@@ -35,15 +34,15 @@ class VirtualAccount(SQLModel, table=True):
     # The gateway's customer code for this account holder. Incoming bank
     # transfers to the account are reported with this code, so we store
     # it to credit the right wallet.
-    provider_customer_code: Optional[str] = Field(
+    provider_customer_code: str | None = Field(
         default=None,
         sa_column=Column(String(128), nullable=True, index=True),
     )
-    account_number: Optional[str] = Field(
+    account_number: str | None = Field(
         default=None,
         sa_column=Column(String(32), unique=True, index=True, nullable=True),
     )
-    account_name: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
-    bank_name: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
+    account_name: str | None = Field(default=None, sa_column=Column(String, nullable=True))
+    bank_name: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     currency: str = Field(default="NGN", max_length=3, nullable=False)
     created_at: datetime = Field(default_factory=datetime.now, nullable=False)

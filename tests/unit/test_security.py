@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-from app.core import config as _config
 from app.core.security import (
     JWTError_,
     create_access_token,

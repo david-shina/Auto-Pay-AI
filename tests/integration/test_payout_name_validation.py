@@ -12,7 +12,7 @@ the bill's vendor. They cover:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
 
 import pytest
@@ -26,10 +26,7 @@ from app.models.bill import Bill
 from app.models.enums import (
     AuditActor,
     BillStatus,
-    TransactionStatus,
-    TransactionType,
 )
-from app.models.transaction import Transaction
 from app.models.user import User
 from app.services.payout import execute_payout
 

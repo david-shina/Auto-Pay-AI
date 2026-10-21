@@ -25,9 +25,9 @@ from __future__ import annotations
 import logging
 import secrets
 from decimal import Decimal
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, status
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
@@ -50,7 +50,6 @@ from app.handlers.bill_conversation import build_bill_conversation
 from app.handlers.helpers import escape_md
 from app.handlers.schedule_conversation import build_schedule_conversation
 from app.handlers.topup_conversation import build_topup_conversation
-from app.models.enums import TransactionType
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
     from app.models.transaction import Transaction
@@ -58,7 +57,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 
 logger = logging.getLogger(__name__)
 
-_application: Optional[Application] = None
+_application: Application | None = None
 
 
 # ── Application factory ─────────────────────────────────────────────
@@ -105,7 +104,7 @@ def build_application(token: str) -> Application:
 
 # ── Lifecycle (used from app/main.py:lifespan) ──────────────────────
 
-async def start_bot() -> Optional[Application]:
+async def start_bot() -> Application | None:
     """Initialize and start the bot in webhook or polling mode.
     Returns the Application, or None if there's no token configured.
     """
@@ -153,7 +152,7 @@ async def stop_bot() -> None:
         if settings.webhook_url:
             try:
                 await _application.bot.delete_webhook()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("delete_webhook failed: %s", exc)
         await _application.stop()
         await _application.shutdown()
@@ -198,7 +197,7 @@ async def telegram_webhook(request: Request) -> dict:
     try:
         payload = await request.json()
         update = Update.de_json(payload, _application.bot)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Don't leak python-telegram-bot library internals (e.g.
         # "AttributeError: 'NoneType' object has no attribute 'chat'")
         # to the caller. Log for ops, return a clean 400.
@@ -212,7 +211,7 @@ async def telegram_webhook(request: Request) -> dict:
     return {"ok": True}
 
 
-def get_application() -> Optional[Application]:
+def get_application() -> Application | None:
     """Test/diagnostic accessor for the running application."""
     return _application
 
@@ -262,8 +261,8 @@ def _notify_keyboard() -> InlineKeyboardMarkup:
 
 async def notify_user_of_transaction(
     *,
-    user: "User",
-    transaction: "Transaction",
+    user: User,
+    transaction: Transaction,
     kind: str,
 ) -> bool:
     """Send a credit / debit / refund notification to the user's
@@ -365,7 +364,7 @@ async def notify_user_of_transaction(
             reply_markup=_notify_keyboard(),
         )
         return True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Telegram errors are best-effort. Log and move on.
         logger.warning(
             "notify_user_of_transaction: failed for user %d: %s",
@@ -376,19 +375,19 @@ async def notify_user_of_transaction(
 
 # Re-export so the webhook / payout code can pass the right enum
 # value without importing the enum directly.
-async def notify_credit(*, user: "User", transaction: "Transaction") -> bool:
+async def notify_credit(*, user: User, transaction: Transaction) -> bool:
     return await notify_user_of_transaction(
         user=user, transaction=transaction, kind="credit",
     )
 
 
-async def notify_debit(*, user: "User", transaction: "Transaction") -> bool:
+async def notify_debit(*, user: User, transaction: Transaction) -> bool:
     return await notify_user_of_transaction(
         user=user, transaction=transaction, kind="debit",
     )
 
 
-async def notify_refund(*, user: "User", transaction: "Transaction") -> bool:
+async def notify_refund(*, user: User, transaction: Transaction) -> bool:
     return await notify_user_of_transaction(
         user=user, transaction=transaction, kind="refund",
     )

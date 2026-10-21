@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict
 
@@ -13,14 +12,14 @@ class TransactionResponse(BaseModel):
 
     id: int
     user_id: int
-    bill_id: Optional[int]
+    bill_id: int | None
     type: str
     amount: Decimal
     fee: Decimal
     currency: str
     status: str
     provider: str
-    provider_reference: Optional[str]
-    narration: Optional[str]
-    failure_reason: Optional[str]
+    provider_reference: str | None
+    narration: str | None
+    failure_reason: str | None
     created_at: datetime

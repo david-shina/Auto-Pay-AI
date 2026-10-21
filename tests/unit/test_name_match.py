@@ -9,7 +9,6 @@ import pytest
 
 from app.services.name_match import names_match
 
-
 # ── Happy path: subsidiary / suffix variations ─────────────────────
 
 

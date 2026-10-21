@@ -18,15 +18,15 @@ from decimal import Decimal
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.core.config import settings
+# Re-read settings in case the module was imported before env was set.
+from app.core.config import (
+    get_settings,
+    )
 from app.core.security import hash_password
 from app.models.enums import BillStatus, TransactionStatus, TransactionType
 from app.models.transaction import Transaction
 from app.models.user import User
 
-
-# Re-read settings in case the module was imported before env was set.
-from app.core.config import get_settings  # noqa: E402
 SECRET = get_settings().paystack_secret_key
 
 
@@ -326,8 +326,9 @@ def test_head_webhook_url_returns_405() -> None:
     make the URL look fully ready for HEAD probes when the
     real method is POST).
     """
-    from fastapi.testclient import TestClient
     import os
+
+    from fastapi.testclient import TestClient
     os.environ["TELEGRAM_BOT_TOKEN"] = ""
     from app.main import app
     c = TestClient(app)

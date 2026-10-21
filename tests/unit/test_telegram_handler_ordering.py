@@ -25,13 +25,10 @@ keeps the tests fast and dependency-free.
 from __future__ import annotations
 
 import pytest
-
 from telegram.ext import (
-    CallbackQueryHandler,
     CommandHandler,
     ConversationHandler,
     MessageHandler,
-    filters,
 )
 
 
@@ -179,6 +176,8 @@ async def test_topup_via_process_update_replies_for_linked_user(
         Message,
         MessageEntity,
         Update,
+    )
+    from telegram import (
         User as TGUser,
     )
 

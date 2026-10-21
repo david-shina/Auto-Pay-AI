@@ -311,7 +311,7 @@ class PaystackProvider(PaymentProvider):
         self,
         *,
         reference: str,
-    ) -> "TransactionStatusResult":
+    ) -> TransactionStatusResult:
         """Look up a single transaction by our reference.
 
         Paystack exposes `GET /transaction/verify/{reference}` which

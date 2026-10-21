@@ -25,7 +25,6 @@ import logging
 import secrets
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 from sqlmodel import Session, select
 
@@ -47,6 +46,7 @@ from app.services.payments import (
     TransactionStatusResult,
     WebhookEvent,
 )
+
 # `notify_credit` is imported lazily inside the credit function to
 # avoid a circular import: telegram.py → topup_conversation.py →
 # wallet.py (the bot handler imports `MAX_TOPUP_NGN` etc. from
@@ -93,7 +93,7 @@ class CreditApplyResult:
     credited: bool
     new_balance: Decimal
     status: str  # "credited" | "already_credited" | "unknown_reference"
-    transaction_id: Optional[int] = None
+    transaction_id: int | None = None
 
 
 async def apply_credit_from_provider_event(
@@ -231,7 +231,7 @@ async def credit_virtual_account_deposit(
     session: Session,
     *,
     event: WebhookEvent,
-) -> Optional[CreditApplyResult]:
+) -> CreditApplyResult | None:
     """Credit a wallet when money is transferred into its virtual account.
 
     Returns `None` when the event does not look like a virtual-account

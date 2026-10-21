@@ -8,15 +8,12 @@ tells the user to run /link.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
 
-from sqlalchemy import select
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.core.database import session_scope
 from app.models.user import User
 from app.models.virtual_account import VirtualAccount
-
 
 # ── Editable fields the user can correct on the extracted bill ──────
 
@@ -158,7 +155,7 @@ def format_multi_field_editor(
 
 # ── Auth helper ─────────────────────────────────────────────────────
 
-def get_linked_user(chat_id: str | int) -> Optional[User]:
+def get_linked_user(chat_id: str | int) -> User | None:
     """Look up the user linked to a Telegram chat id. Returns None if
     the chat hasn't been linked yet.
 
@@ -183,7 +180,7 @@ def get_linked_user(chat_id: str | int) -> Optional[User]:
         return user
 
 
-def get_user_va(user: User) -> Optional[VirtualAccount]:
+def get_user_va(user: User) -> VirtualAccount | None:
     from sqlalchemy import select as _sa_select
     with session_scope() as session:
         return session.exec(
@@ -193,7 +190,7 @@ def get_user_va(user: User) -> Optional[VirtualAccount]:
 
 # ── Date parsing (bot-side) ─────────────────────────────────────────
 
-def parse_user_date(text: str) -> Optional[datetime]:
+def parse_user_date(text: str) -> datetime | None:
     """Try a few common formats. Returns naive datetime on success.
     The bot only needs to read user input; the API's date_parser has
     the full LLM-aware logic."""
@@ -205,7 +202,7 @@ def parse_user_date(text: str) -> Optional[datetime]:
         return None
 
 
-def date_from_quickpick(token: str) -> Optional[datetime]:
+def date_from_quickpick(token: str) -> datetime | None:
     """Map a date-quick-pick callback_data token to a real datetime.
 
     `token` is the part after the `date_` prefix, e.g. `today`,
@@ -242,15 +239,15 @@ def escape_md(text: str) -> str:
 __all__ = [
     "EDITABLE_FIELDS",
     "confirm_keyboard",
-    "field_keyboard",
-    "multi_field_editor_keyboard",
+    "date_from_quickpick",
     "date_quickpick_keyboard",
+    "escape_md",
+    "field_keyboard",
     "final_keyboard",
     "format_bill_summary",
     "format_multi_field_editor",
     "get_linked_user",
     "get_user_va",
+    "multi_field_editor_keyboard",
     "parse_user_date",
-    "date_from_quickpick",
-    "escape_md",
 ]

@@ -11,10 +11,8 @@ chat id on the user row.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
-from sqlalchemy import select
 from telegram import Update
 from telegram.ext import ContextTypes
 
@@ -24,7 +22,7 @@ from app.handlers.helpers import (
     get_linked_user,
     get_user_va,
 )
-from app.models.enums import AuditActor, AuditEventType, AuditEntityType
+from app.models.enums import AuditActor, AuditEntityType, AuditEventType
 from app.models.telegram_link_code import TelegramLinkCode
 from app.models.user import User
 from app.services.audit import write_audit
@@ -93,7 +91,7 @@ async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             )
             return
 
-        if link_code.expires_at < datetime.now(tz=timezone.utc):
+        if link_code.expires_at < datetime.now(tz=UTC):
             await update.message.reply_text(
                 "⏰ That code has expired. Generate a new one from the web dashboard."
             )
@@ -225,7 +223,6 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def bills_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from app.models.bill import Bill
-    from app.models.enums import BillStatus
     chat_id = str(update.effective_chat.id)
     user = get_linked_user(chat_id)
     if user is None:

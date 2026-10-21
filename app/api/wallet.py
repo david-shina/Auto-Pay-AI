@@ -19,21 +19,20 @@ from __future__ import annotations
 
 import logging
 from decimal import Decimal
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlmodel import Session, select
 
 from app.core.database import get_session
-from app.models.user import User
-from app.models.virtual_account import VirtualAccount
 from app.models.enums import (
     AuditActor,
     AuditEntityType,
     AuditEventType,
 )
 from app.models.transaction import Transaction
+from app.models.user import User
+from app.models.virtual_account import VirtualAccount
 from app.schemas.transaction import TransactionResponse
 from app.services.audit import (
     audit_va_created,
@@ -61,10 +60,10 @@ router = APIRouter(tags=["wallet"])
 class VirtualAccountPublic(BaseModel):
     """Wire format for the user's virtual account."""
 
-    account_number: Optional[str] = None
-    account_name: Optional[str] = None
-    bank_name: Optional[str] = None
-    bank_code: Optional[str] = None
+    account_number: str | None = None
+    account_name: str | None = None
+    bank_name: str | None = None
+    bank_code: str | None = None
     provider: str
     provider_reference: str
 
@@ -186,7 +185,7 @@ class TopupRequest(BaseModel):
         gt=0,
         description="Amount in NGN. Must be between 100 and 1,000,000.",
     )
-    callback_url: Optional[str] = Field(
+    callback_url: str | None = Field(
         default=None,
         description="Where to redirect the user after the Paystack page. "
         "Defaults to a deep-link back to the dashboard / bot.",
@@ -377,7 +376,7 @@ async def verify_topup(
 )
 def list_transactions(
     limit: int = Query(20, ge=1, le=100),
-    type: Optional[str] = Query(
+    type: str | None = Query(
         None,
         description="Filter by transaction type ('credit' or 'debit')",
     ),

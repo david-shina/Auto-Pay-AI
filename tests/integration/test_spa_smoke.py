@@ -27,6 +27,7 @@ def _get_spa_assets() -> tuple[str, str]:
     import os
     os.environ["TELEGRAM_BOT_TOKEN"] = ""  # disable bot init
     from fastapi.testclient import TestClient
+
     from app.main import app
     c = TestClient(app)
     return c.get("/").text, c.get("/static/app.js").text
@@ -111,6 +112,7 @@ def test_spa_html_loads_without_404() -> None:
     import os
     os.environ["TELEGRAM_BOT_TOKEN"] = ""
     from fastapi.testclient import TestClient
+
     from app.main import app
     c = TestClient(app)
     r = c.get("/")
@@ -195,7 +197,9 @@ def test_spa_no_old_state_machine_for_balance() -> None:
 
 def test_spa_no_console_errors_on_load() -> None:
     """End-to-end in Node: load the bundle, no exceptions."""
-    import os, subprocess, tempfile
+    import os
+    import subprocess
+    import tempfile
     if shutil.which("node") is None:
         pytest.skip("Node.js not on PATH")
     html, js = _get_spa_assets()

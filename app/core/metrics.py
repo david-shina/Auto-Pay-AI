@@ -88,21 +88,21 @@ SCHEDULER_AUTOPAY_SECONDS = Histogram(
 
 
 __all__ = [
-    "HTTP_REQUESTS",
-    "HTTP_REQUEST_SECONDS",
     "BILLS_CREATED",
     "BILLS_PAID",
+    "HTTP_REQUESTS",
+    "HTTP_REQUEST_SECONDS",
     "PAYOUTS",
-    "TOPUPS_INITIATED",
-    "TOPUPS_CREDITED",
-    "SCHEDULER_JOBS",
     "SCHEDULER_AUTOPAY_SECONDS",
-    "record_topup_initiated",
-    "record_topup_credited",
+    "SCHEDULER_JOBS",
+    "TOPUPS_CREDITED",
+    "TOPUPS_INITIATED",
     "record_bill_created",
     "record_bill_paid",
     "record_payout",
     "record_scheduler_job",
+    "record_topup_credited",
+    "record_topup_initiated",
 ]
 
 

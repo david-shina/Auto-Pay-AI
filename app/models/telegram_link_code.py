@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import BigInteger, Column, ForeignKey, String
 from sqlmodel import Field, SQLModel
@@ -15,7 +14,7 @@ from sqlmodel import Field, SQLModel
 class TelegramLinkCode(SQLModel, table=True):
     __tablename__ = "telegram_link_codes"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )

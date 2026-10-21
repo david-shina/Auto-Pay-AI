@@ -11,7 +11,6 @@ identifier. Storage rules:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import BigInteger, Column, ForeignKey, LargeBinary, String
 from sqlmodel import Field, SQLModel
@@ -20,7 +19,7 @@ from sqlmodel import Field, SQLModel
 class KycRecord(SQLModel, table=True):
     __tablename__ = "kyc_records"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )
@@ -39,5 +38,5 @@ class KycRecord(SQLModel, table=True):
         sa_column=Column(String(64), nullable=False, unique=True, index=True),
     )
     bvn_validated: bool = Field(default=False, nullable=False)
-    validated_at: Optional[datetime] = Field(default=None, nullable=True)
+    validated_at: datetime | None = Field(default=None, nullable=True)
     created_at: datetime = Field(default_factory=datetime.now, nullable=False)

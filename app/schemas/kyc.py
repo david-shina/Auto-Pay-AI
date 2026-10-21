@@ -2,9 +2,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class KycSubmitRequest(BaseModel):
@@ -21,5 +20,5 @@ class KycStatusResponse(BaseModel):
     user_id: int
     bvn_last4: str
     bvn_validated: bool
-    validated_at: Optional[datetime]
+    validated_at: datetime | None
     created_at: datetime

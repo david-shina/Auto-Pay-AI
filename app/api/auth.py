@@ -4,7 +4,7 @@ Mounted at /api/v1/auth in `app.main`.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel
@@ -15,6 +15,7 @@ from app.core.database import get_session
 from app.core.http import client_ip as _client_ip
 from app.models.telegram_link_code import TelegramLinkCode
 from app.models.user import User
+from app.models.virtual_account import VirtualAccount
 from app.schemas.auth import (
     LoginRequest,
     LogoutRequest,
@@ -24,6 +25,7 @@ from app.schemas.auth import (
     UserPublic,
     WalletBalance,
 )
+from app.services.audit import audit_va_created
 from app.services.auth import (
     authenticate_user,
     get_current_active_user,
@@ -33,8 +35,6 @@ from app.services.auth import (
     signup_user,
 )
 from app.services.payments import PaymentProvider, get_payment_provider
-from app.services.audit import audit_va_created
-from app.models.virtual_account import VirtualAccount
 
 router = APIRouter(tags=["auth"])
 
@@ -124,9 +124,9 @@ async def _try_provision_dva(
             phone=user.phone_number,
         )
         va_data = await provider.create_virtual_account(customer_code=customer_code)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
+        from app.models.enums import AuditActor, AuditEntityType, AuditEventType
         from app.services.audit import write_audit
-        from app.models.enums import AuditActor, AuditEventType, AuditEntityType
         write_audit(
             session,
             actor=AuditActor.SYSTEM,
@@ -258,7 +258,7 @@ def create_telegram_link_code(
     after a Telegram unlink.
     """
     code = TelegramLinkCode.generate_code()
-    expires_at = datetime.now(tz=timezone.utc) + timedelta(minutes=15)
+    expires_at = datetime.now(tz=UTC) + timedelta(minutes=15)
     row = TelegramLinkCode(
         user_id=user.id,
         code=code,

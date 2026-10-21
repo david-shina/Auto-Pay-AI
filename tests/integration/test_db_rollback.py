@@ -30,13 +30,7 @@ from app.services.payments.base import (
     TransferResult,
     VirtualAccountData,
 )
-from app.services.payments import (
-    InvalidAccount,
-    PaymentError,
-)
 from app.services.payout import confirm_payout
-from app.main import app  # noqa: E402
-
 
 # ── Atomicity ──────────────────────────────────────────────────────
 
@@ -114,13 +108,9 @@ def test_payout_failure_rolls_back_wallet_debit(client: TestClient, session: Ses
 def test_second_payout_attempt_gets_409(session: Session) -> None:
     """Sequential simulation: first attempt succeeds, the second
     sees bill.status='processing' and is rejected with 409."""
-    from app.services.payments.base import (
-        ResolvedAccount,
-        TransferResult,
-        VirtualAccountData,
-    )
-    from app.services.payout import execute_payout
     from fastapi import HTTPException
+
+    from app.services.payout import execute_payout
 
     user = User(
         email="bob@x.com",
@@ -162,7 +152,6 @@ def test_second_payout_attempt_gets_409(session: Session) -> None:
         def verify_webhook_signature(self, **k): return True
         async def parse_webhook(self, **k): raise NotImplementedError
 
-    import asyncio
     # First attempt succeeds
     asyncio.run(execute_payout(session, bill_id=bill.id, provider=_Stub()))
     session.commit()

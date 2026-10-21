@@ -14,7 +14,6 @@ import pytest
 import respx
 
 from app.services.payments import (
-    AccountNameMismatch,
     AuthenticationError,
     InvalidAccount,
     KYCRequired,

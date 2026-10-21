@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import BigInteger, Column, ForeignKey, Numeric, String
 from sqlmodel import Field, SQLModel
@@ -35,7 +34,7 @@ from sqlmodel import Field, SQLModel
 class Transaction(SQLModel, table=True):
     __tablename__ = "transactions"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )
@@ -47,7 +46,7 @@ class Transaction(SQLModel, table=True):
             index=True,
         ),
     )
-    bill_id: Optional[int] = Field(
+    bill_id: int | None = Field(
         default=None,
         sa_column=Column(
             BigInteger,
@@ -73,7 +72,7 @@ class Transaction(SQLModel, table=True):
         index=True,
     )
     provider: str = Field(default="paystack", max_length=32, nullable=False)
-    provider_reference: Optional[str] = Field(
+    provider_reference: str | None = Field(
         default=None,
         sa_column=Column(String(128), unique=True, index=True, nullable=True),
     )
@@ -81,13 +80,13 @@ class Transaction(SQLModel, table=True):
     # by `start_topup` after the provider's hosted page responds;
     # used to query the provider's transaction-status API. Nullable
     # so existing rows continue to work.
-    provider_order_reference: Optional[str] = Field(
+    provider_order_reference: str | None = Field(
         default=None,
         sa_column=Column(String(128), nullable=True, index=True),
     )
     retry_count: int = Field(default=0, nullable=False)
-    failure_reason: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
-    narration: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
+    failure_reason: str | None = Field(default=None, sa_column=Column(String, nullable=True))
+    narration: str | None = Field(default=None, sa_column=Column(String, nullable=True))
 
     created_at: datetime = Field(default_factory=datetime.now, nullable=False)
     updated_at: datetime = Field(

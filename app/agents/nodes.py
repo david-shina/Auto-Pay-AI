@@ -12,9 +12,8 @@ thin wrapper that knows how to read/write `AgentState`.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Optional
 
 from app.agents.state import AgentState, Decision, DecisionResult
 from app.models.bill import Bill
@@ -68,10 +67,10 @@ def decide_for_bill(
     *,
     user: User,
     fee: Decimal,
-    now: Optional[datetime] = None,
+    now: datetime | None = None,
 ) -> DecisionResult:
     """Convenience wrapper for the (Bill, User) pair."""
-    now = now or datetime.now(tz=timezone.utc)
+    now = now or datetime.now(tz=UTC)
     days_until_due = (bill.due_date - now).days
     return decide(
         user_balance=Decimal(str(user.balance)),

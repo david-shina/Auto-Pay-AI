@@ -10,7 +10,7 @@ fixture (Postgres) so we get full SQLAlchemy + JSONB support.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -20,7 +20,6 @@ from app.core.database import session_scope
 from app.core.security import hash_password
 from app.models.telegram_link_code import TelegramLinkCode
 from app.models.user import User
-
 
 # ── Helpers ─────────────────────────────────────────────────────────
 
@@ -123,7 +122,7 @@ async def test_link_with_valid_code_links_user(session) -> None:
         TelegramLinkCode(
             user_id=user_id,
             code=code,
-            expires_at=datetime.now(tz=timezone.utc) + timedelta(minutes=15),
+            expires_at=datetime.now(tz=UTC) + timedelta(minutes=15),
         )
     )
     session.commit()
@@ -155,7 +154,7 @@ async def test_link_with_expired_code_rejects(session) -> None:
         TelegramLinkCode(
             user_id=user_id,
             code=code,
-            expires_at=datetime.now(tz=timezone.utc) - timedelta(minutes=1),
+            expires_at=datetime.now(tz=UTC) - timedelta(minutes=1),
         )
     )
     session.commit()
@@ -298,11 +297,9 @@ async def test_transactions_shows_credits_and_debits(session) -> None:
 
     # Use a fresh chat_id that no other test uses, and a unique
     # email so we don't collide with prior tests in the same run.
-    _link_user_sync(session, email=f"tx1@x.com", chat_id=33330)
+    _link_user_sync(session, email="tx1@x.com", chat_id=33330)
     # Re-fetch the user via session_scope (the path the handler uses).
     with session_scope() as s:
-        from sqlalchemy import select as _sa_select
-        from app.models.user import User as _User
         # Force-load id while session is open (avoid DetachedInstanceError)
         from app.handlers.helpers import get_linked_user
         u = get_linked_user("33330")
@@ -821,7 +818,6 @@ async def test_topup_quickpick_creates_pending_transaction(
 
     from app.handlers.topup_conversation import (
         TOPUP_DONE,
-        TOPUP_PICK,
         handle_quickpick,
     )
     from app.models.transaction import Transaction

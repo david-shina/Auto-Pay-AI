@@ -7,7 +7,7 @@ business row commit (or rollback) atomically. There is no separate
 """
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 from sqlmodel import Session
 
@@ -20,13 +20,13 @@ def write_audit(
     *,
     actor: AuditActor | str,
     event_type: AuditEventType | str,
-    user_id: Optional[int] = None,
-    entity_type: Optional[AuditEntityType | str] = None,
-    entity_id: Optional[int] = None,
-    before_state: Optional[dict[str, Any]] = None,
-    after_state: Optional[dict[str, Any]] = None,
-    metadata: Optional[dict[str, Any]] = None,
-    ip_address: Optional[str] = None,
+    user_id: int | None = None,
+    entity_type: AuditEntityType | str | None = None,
+    entity_id: int | None = None,
+    before_state: dict[str, Any] | None = None,
+    after_state: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    ip_address: str | None = None,
 ) -> AuditLog:
     """Append an audit row to `session` (does NOT commit).
 

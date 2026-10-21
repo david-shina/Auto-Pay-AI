@@ -24,9 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
-from typing import Optional
 
-from sqlalchemy import select
 from telegram import Update
 from telegram.ext import (
     CallbackQueryHandler,
@@ -55,11 +53,9 @@ from app.handlers.helpers import (
     parse_user_date,
 )
 from app.models.bill import Bill
-from app.models.enums import AuditActor, AuditEntityType, AuditEventType, BillStatus
-from app.models.user import User
+from app.models.enums import BillStatus
 from app.services.audit import audit_bill_created
 from app.services.date_parser import parse_bill_due_date
-from app.services.loaders import loader_from_upload
 from app.services.name_match import names_match
 from app.services.payments import (
     InvalidAccount,
@@ -112,7 +108,7 @@ async def receive_bill(
 
     try:
         extracted = await loader.extract()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("bill extraction failed: %s", exc)
         await msg.reply_text(
             f"❌ Couldn't extract bill details: {exc}\n\n"
@@ -330,7 +326,7 @@ def _cancel_persisted_bill(context: ContextTypes.DEFAULT_TYPE) -> None:
             if bill and bill.status == BillStatus.PENDING.value:
                 bill.status = BillStatus.CANCELLED.value
                 session.add(bill)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("could not cancel bill %d: %s", bill_id, exc)
     context.user_data.clear()
 
@@ -618,7 +614,7 @@ async def handle_new_value(
             bill_data = context.user_data.get("bill", {})
             edited = context.user_data.get("edited_keys", set())
             await update.message.reply_text(
-                f"⚠️ Amount must be between 1 and 10,000,000.\n\n"
+                "⚠️ Amount must be between 1 and 10,000,000.\n\n"
                 "Try again:",
                 parse_mode="Markdown",
                 reply_markup=multi_field_editor_keyboard(bill_data, edited),
@@ -677,7 +673,7 @@ async def handle_final_confirm(
         with session_scope() as session:
             result = await execute_payout(session, bill_id=bill_id, provider=provider)
             session.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("payout failed for bill %d: %s", bill_id, exc)
         await query.edit_message_text(
             f"❌ *Payment Failed*\n\nReason: {exc}\n\nPlease try again or top up your wallet.",

@@ -6,14 +6,13 @@ because both are low-level primitives used by many modules.
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import bcrypt
 from jose import JWTError, jwt
 
 from app.core.config import settings
-
 
 # ── Password hashing ────────────────────────────────────────────────
 
@@ -63,7 +62,7 @@ def create_access_token(
 ) -> str:
     """Issue a short-lived access token (default 15 min)."""
     secret = _require_secret()
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     expire = now + (expires_delta or timedelta(minutes=settings.jwt_access_ttl_min))
     payload: dict[str, Any] = {
         "sub": str(subject),
@@ -87,7 +86,7 @@ def create_refresh_token(
     identifiable in our `refresh_tokens` table.
     """
     secret = _require_secret()
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     expire = now + (expires_delta or timedelta(days=settings.jwt_refresh_ttl_days))
     payload = {
         "sub": str(subject),

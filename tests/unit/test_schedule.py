@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -28,12 +27,9 @@ from app.models.enums import BillStatus
 from app.models.user import User
 from app.services.bill import (
     BillValidationError,
-    MAX_BILL_NGN,
-    MIN_BILL_NGN,
     ScheduleBillInput,
     create_scheduled_bill,
 )
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -445,8 +441,8 @@ async def test_handle_confirm_yes_persists_scheduled_bill(session) -> None:
     `status=scheduled, is_recurring=..., next_recurrence_date=...`."""
     from app.handlers.schedule_conversation import (
         ConversationHandler,
-        handle_amount,
         handle_account,
+        handle_amount,
         handle_bank_picked,
         handle_confirm_yes,
         handle_date_picked,

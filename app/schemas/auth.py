@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -36,7 +35,7 @@ class LogoutRequest(BaseModel):
     """If `refresh_token` is omitted, all of the user's refresh
     tokens are revoked (sign-out-everywhere)."""
 
-    refresh_token: Optional[str] = Field(default=None, min_length=10)
+    refresh_token: str | None = Field(default=None, min_length=10)
 
 
 class TokenResponse(BaseModel):

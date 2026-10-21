@@ -17,8 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -35,7 +34,6 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.enums import AuditActor
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.services.audit import audit_login, audit_logout, audit_user_signup
@@ -92,7 +90,7 @@ def signup_user(
     first_name: str,
     last_name: str,
     phone_number: str,
-    ip_address: Optional[str] = None,
+    ip_address: str | None = None,
 ) -> User:
     """Create a new user. Raises 409 on duplicate email/phone.
 
@@ -142,7 +140,7 @@ def issue_tokens(
     *,
     user: User,
     audit: bool = True,
-    ip: Optional[str] = None,
+    ip: str | None = None,
 ) -> tuple[str, str, int]:
     """Mint an access+refresh pair. Stores the refresh token hash.
 
@@ -163,7 +161,7 @@ def rotate_tokens(
     session: Session,
     *,
     refresh_token: str,
-    ip: Optional[str] = None,
+    ip: str | None = None,
 ) -> tuple[str, str, int]:
     """Exchange a valid refresh token for a new pair. The old refresh
     is revoked atomically (revoke + insert in one transaction)."""
@@ -190,7 +188,7 @@ def rotate_tokens(
             RefreshToken.user_id == user_id,
         )
     ).first()
-    if row is None or row.revoked or row.expires_at < datetime.now(tz=timezone.utc):
+    if row is None or row.revoked or row.expires_at < datetime.now(tz=UTC):
         # Treat reuse of a revoked/expired token as compromise: revoke
         # all of this user's refresh tokens.
         _revoke_all_for_user(session, user_id=user_id)
@@ -246,8 +244,8 @@ def logout_user(
     session: Session,
     *,
     user: User,
-    refresh_token: Optional[str] = None,
-    ip: Optional[str] = None,
+    refresh_token: str | None = None,
+    ip: str | None = None,
 ) -> None:
     """Log the user out. If `refresh_token` is given, revoke *that*
     specific one; otherwise revoke all of the user's outstanding
@@ -314,9 +312,9 @@ def get_current_active_user(
 
 
 def get_optional_current_user(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     session: Session = Depends(get_session),
-) -> Optional[User]:
+) -> User | None:
     """Like `get_current_user` but returns None when the token is
     missing/invalid. Useful for endpoints that are public but
     personalize the response when authed (e.g. health)."""

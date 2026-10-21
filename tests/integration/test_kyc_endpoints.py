@@ -4,9 +4,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.core.security import hash_password
 from app.models.kyc import KycRecord
-from app.models.user import User
 
 
 def _auth_header(client: TestClient) -> str:

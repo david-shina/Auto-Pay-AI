@@ -17,6 +17,8 @@ from pathlib import Path
 # Make `app` importable when running this file as a script
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from datetime import UTC
+
 from sqlmodel import Session, select
 
 from app.core.database import engine
@@ -142,9 +144,9 @@ def seed() -> None:
 
 
 def user_due_date(days_from_now: int):
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
-    return datetime.now(tz=timezone.utc) + timedelta(days=days_from_now)
+    return datetime.now(tz=UTC) + timedelta(days=days_from_now)
 
 
 if __name__ == "__main__":

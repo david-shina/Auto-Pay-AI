@@ -7,10 +7,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
-from app.services.payout import _ngn_to_kobo  # noqa: SLF001
-
+from app.services.payout import _ngn_to_kobo
 
 # ── kobo conversion ─────────────────────────────────────────────────
 

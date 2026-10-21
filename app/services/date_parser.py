@@ -23,14 +23,13 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
 
 # ── Public API ───────────────────────────────────────────────────────
 
-def parse_bill_due_date(raw: Union[None, str, datetime]) -> datetime:
+def parse_bill_due_date(raw: None | str | datetime) -> datetime:
     """Best-effort parse. Never raises; falls back to `datetime.now()`."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
         return _now()
@@ -114,7 +113,7 @@ def _clamp_to_present(dt: datetime) -> datetime:
     return dt
 
 
-def _try_iso(s: str) -> Optional[datetime]:
+def _try_iso(s: str) -> datetime | None:
     """ISO 8601 — full datetime, date-only, with/without TZ, with/without microseconds."""
     for fmt in (
         "%Y-%m-%dT%H:%M:%S.%f%z",
@@ -154,7 +153,7 @@ _WORD_TO_INT = {
 }
 
 
-def _try_relative(s: str) -> Optional[datetime]:
+def _try_relative(s: str) -> datetime | None:
     """Parse 'today', 'tomorrow', 'in 2 weeks', '5 days from today', etc."""
     s_low = s.lower().strip().rstrip(".")
     if s_low in ("today", "now"):

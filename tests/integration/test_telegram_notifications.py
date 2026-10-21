@@ -12,7 +12,6 @@ These cover:
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -32,7 +31,6 @@ from app.models.enums import (
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.services import telegram as tg_service
-
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -286,8 +284,9 @@ async def test_notify_swallows_telegram_errors(
 async def test_done_balance_button_shows_balance(session) -> None:
     """Tapping 'Check balance' on the Done keyboard shows the
     current wallet balance."""
-    from app.handlers.topup_conversation import handle_done_balance
     from telegram.ext import ConversationHandler
+
+    from app.handlers.topup_conversation import handle_done_balance
 
     _link_user(session, email="done1@x.com", chat_id=110001, balance="12345.67")
 
@@ -340,8 +339,9 @@ async def test_done_again_button_returns_to_quick_pick() -> None:
 @pytest.mark.asyncio
 async def test_done_close_button_just_acks() -> None:
     """Tapping the final 'Done' just acknowledges the user is done."""
-    from app.handlers.topup_conversation import handle_done_close
     from telegram.ext import ConversationHandler
+
+    from app.handlers.topup_conversation import handle_done_close
 
     query = MagicMock()
     query.answer = AsyncMock()
@@ -369,8 +369,6 @@ async def test_charge_success_webhook_fires_credit_notification(
 ) -> None:
     """A `charge.success` webhook should credit the wallet AND
     push a notification to the user's linked Telegram."""
-    from app.core.config import settings
-    from app.services import payments as _payments_pkg
 
     u = _link_user(session, email="e2e1@x.com", chat_id=120001, balance="0")
     user_id = u.id
@@ -435,7 +433,6 @@ async def test_transfer_success_webhook_fires_debit_notification(
 ) -> None:
     """A `transfer.success` webhook for a bill payment should mark
     the bill paid AND push a debit notification."""
-    from app.core.config import settings
 
     u = _link_user(session, email="e2e2@x.com", chat_id=120002, balance="10000")
     user_id = u.id
@@ -512,7 +509,7 @@ async def test_transfer_failed_webhook_fires_refund_notification(
     """A `transfer.failed` webhook for a bill payment should mark
     the txn failed + refund the user AND push a refund notification."""
     from datetime import datetime
-    from app.core.config import settings
+
 
     u = _link_user(session, email="e2e3@x.com", chat_id=120003, balance="0")
     user_id = u.id
@@ -571,8 +568,9 @@ async def test_transfer_failed_webhook_fires_refund_notification(
     # webhook handler — the test only simulates the provider-side
     # event). Bill bumped retry count.
     with session_scope() as verify:
-        from app.models.transaction import Transaction as _Txn
         from sqlalchemy import select as _sa
+
+        from app.models.transaction import Transaction as _Txn
         txns = verify.execute(
             _sa(_Txn).where(_Txn.provider_reference == "autopay_e2e_refund_1")
         ).scalars().all()

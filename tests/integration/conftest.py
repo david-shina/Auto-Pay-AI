@@ -23,10 +23,9 @@ from tests.conftest import TEST_DATABASE_URL
 os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 # Now import the app
-import app.core.config as _config_mod  # noqa: E402
-import app.services.crypto as _crypto  # noqa: E402
-from app.core import config as _config  # noqa: E402
-from app.core import database as _database  # noqa: E402
+import app.core.config as _config_mod
+import app.services.crypto as _crypto
+from app.core import config as _config
 
 _config.get_settings.cache_clear()
 _crypto._fernet.cache_clear()

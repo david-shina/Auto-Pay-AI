@@ -7,16 +7,14 @@ The rule (from `app/agents/nodes.py`):
 """
 from __future__ import annotations
 
+from datetime import UTC
 from decimal import Decimal
-
-import pytest
 
 from app.agents.graphs import run_agent
 from app.agents.nodes import decide, decide_for_bill
 from app.agents.state import Decision, DecisionResult
 from app.models.bill import Bill
 from app.models.user import User
-
 
 FEE = Decimal("50.00")
 
@@ -129,14 +127,14 @@ def test_run_agent_matches_pure_decide() -> None:
 # ── decide_for_bill(Bill, User) wrapper ────────────────────────────
 
 def test_decide_for_bill_uses_bill_due_date() -> None:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     user = User(id=1, first_name="a", last_name="b", email="a@b.com",
                 phone_number="0801", hashed_password="x", balance=Decimal("1000"))
     bill = Bill(
         id=1, user_id=1, vendor_name="PHCN",
         amount=Decimal("100"),
-        due_date=datetime.now(tz=timezone.utc) + timedelta(days=2),
+        due_date=datetime.now(tz=UTC) + timedelta(days=2),
     )
     out = decide_for_bill(bill, user=user, fee=FEE)
     assert out.decision is Decision.PAY_NOW

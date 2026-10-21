@@ -2,8 +2,8 @@
 from collections.abc import Generator
 from contextlib import contextmanager
 
-from sqlmodel import Session, SQLModel, create_engine
 from sqlalchemy.engine import Engine
+from sqlmodel import Session, SQLModel, create_engine
 
 from app.core.config import settings
 

@@ -43,7 +43,7 @@ from telegram.ext import (
 from app.core.database import session_scope
 from app.handlers.helpers import escape_md, get_linked_user
 from app.services import payments as _payments_pkg
-from app.services.payments import PaymentError, get_payment_provider
+from app.services.payments import PaymentError
 from app.services.wallet import (
     MAX_TOPUP_NGN,
     MIN_TOPUP_NGN,
@@ -291,7 +291,7 @@ async def handle_cancel(
     if hasattr(query, "answer"):
         try:
             await query.answer()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     if hasattr(query, "edit_message_text"):
         await query.edit_message_text(
@@ -484,7 +484,6 @@ async def handle_verify(
     handler gives the user a one-tap UX without waiting for the
     next tick.
     """
-    from app.services.payments import get_payment_provider
     from app.services.wallet import verify_pending_topup
 
     query = update.callback_query
@@ -511,7 +510,7 @@ async def handle_verify(
             result = await verify_pending_topup(
                 session, user=user, reference=ref, provider=provider,
             )
-    except Exception as exc:  # noqa: BLE001
+    except Exception:
         logger.exception("handle_verify failed for user %d ref %s", user.id, ref)
         await query.edit_message_text(
             "❌ Verification failed. Please try again in a moment."

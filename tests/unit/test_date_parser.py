@@ -13,7 +13,6 @@ import pytest
 
 from app.services.date_parser import parse_bill_due_date
 
-
 # ── None / empty ─────────────────────────────────────────────────────
 
 def test_none_returns_now() -> None:

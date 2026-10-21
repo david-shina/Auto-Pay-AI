@@ -5,13 +5,10 @@ on _fernet() before any of these tests run.
 """
 from __future__ import annotations
 
-import os
 from unittest.mock import patch
 
 import pytest
-from cryptography.fernet import Fernet
 
-from app.core import config as _config
 from app.services import crypto as _crypto
 from app.services.crypto import (
     BVNKeyError,

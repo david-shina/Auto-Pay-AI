@@ -36,7 +36,7 @@ def readyz(session: Session = Depends(get_session)) -> JSONResponse:
             status_code=200,
             content={"status": "ready", "database": "ok"},
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Log the full DB driver error for operators, but only return
         # a generic "unreachable" to the caller (probes shouldn't
         # leak DB internals).

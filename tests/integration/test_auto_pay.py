@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from decimal import Decimal
 
-from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from app.core.database import session_scope
@@ -23,10 +22,7 @@ from app.models.enums import (
     AuditActor,
     AuditEventType,
     BillStatus,
-    TransactionStatus,
-    TransactionType,
 )
-from app.models.transaction import Transaction
 from app.models.user import User
 
 

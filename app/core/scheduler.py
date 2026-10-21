@@ -31,10 +31,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Optional
 
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import HTTPException
 
@@ -47,7 +46,7 @@ from app.core.metrics import (
 
 logger = logging.getLogger(__name__)
 
-_scheduler: Optional[object] = None
+_scheduler: object | None = None
 
 
 # ── Public API ──────────────────────────────────────────────────────
@@ -90,7 +89,7 @@ def start_scheduler() -> None:
     try:
         _scheduler.start()
         logger.info("Scheduler started: %s", [j.id for j in _scheduler.get_jobs()])
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Scheduler failed to start: %s", exc)
 
 
@@ -100,13 +99,13 @@ def stop_scheduler() -> None:
         return
     try:
         _scheduler.shutdown(wait=False)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("Scheduler shutdown error: %s", exc)
     finally:
         _scheduler = None
 
 
-def get_scheduler() -> Optional[object]:
+def get_scheduler() -> object | None:
     return _scheduler
 
 
@@ -134,7 +133,7 @@ def _run_sync_in_private_loop(job_id: str, fn):
             return
         try:
             asyncio.run(fn())
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Scheduler job %s raised", job_id)
 
     return wrapper
@@ -153,6 +152,7 @@ def _claim_due_scheduled_bill_ids(session) -> list[int]:
     for acting on them within the same transaction (or a fresh one).
     """
     from datetime import datetime
+
     from sqlalchemy import select as _sa_select
 
     from app.models.bill import Bill
@@ -188,27 +188,8 @@ def _process_scheduled_bills() -> None:
     Errors per bill are caught and logged so one bad bill doesn't
     poison the loop.
     """
-    import logging
 
-    from app.agents.graphs import run_agent
-    from app.agents.state import Decision
-    from app.core.config import settings
     from app.core.database import session_scope
-    from app.models.bill import Bill
-    from app.models.enums import (
-        AuditActor,
-        AuditEntityType,
-        AuditEventType,
-        BillStatus,
-    )
-    from app.models.user import User
-    from app.services.audit import write_audit
-    from app.services.payments import (
-        PaymentError,
-        PaymentProvider,
-        get_payment_provider,
-    )
-    from app.services.payout import execute_payout
 
     logger.info("scheduler.process_scheduled_bills.start")
 
@@ -228,7 +209,7 @@ def _process_scheduled_bills() -> None:
     for bill_id in claimed_ids:
         try:
             _autopay_one_bill(bill_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.exception(
                 "scheduler.process_scheduled_bills.error bill_id=%d err=%s",
                 bill_id, exc,
@@ -254,10 +235,7 @@ def _autopay_one_bill(bill_id: int) -> None:
     from app.services.audit import write_audit
     from app.services.payments import (
         PaymentError,
-        PaymentProvider,
-        get_payment_provider,
     )
-    from app.services.payout import execute_payout
 
     with session_scope() as session:
         db_bill = session.get(Bill, bill_id)
@@ -357,7 +335,7 @@ def _autopay_one_bill(bill_id: int) -> None:
         )
         record_payout(result="provider_error")
         record_scheduler_job(job_id="process_scheduled_bills", result="skip")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # Anything else is a real bug. Log and continue.
         logger.exception(
             "scheduler.autopay.unexpected bill_id=%d err=%s",
@@ -379,8 +357,8 @@ async def _async_autopay(bill_id: int) -> None:
     from app.core.database import session_scope
     from app.models.enums import AuditActor
     from app.services import payments as _payments_module
-    from app.services.payout import execute_payout
     from app.services.payments import PaymentProvider
+    from app.services.payout import execute_payout
 
     # Import the function (binds locally) but call the patched
     # version from the package module — that's the one tests
@@ -404,12 +382,11 @@ async def _async_autopay(bill_id: int) -> None:
 def _process_recurring_bills() -> None:
     """Spawn the next occurrence of every recurring bill whose
     `next_recurrence_date` is in the past."""
-    from datetime import datetime, timedelta
-    from sqlalchemy import select
+    from datetime import datetime
 
     from app.core.database import session_scope
     from app.models.bill import Bill
-    from app.models.enums import AuditActor, AuditEntityType, AuditEventType, BillStatus
+    from app.models.enums import AuditActor, AuditEntityType, AuditEventType
     from app.services.audit import write_audit
     from app.services.payout import schedule_recurrence
 
@@ -447,5 +424,5 @@ def _process_recurring_bills() -> None:
                     )
                     session.commit()
             logger.info("Scheduler: spawned next recurrence for bill %d", original_id)
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("Scheduler: error recurring bill %d", original_id)

@@ -26,7 +26,6 @@ import re
 import unicodedata
 from typing import Final
 
-
 # Common corporate/legal suffixes that Nigerian banks use
 # inconsistently. We strip these from BOTH sides so "DSTV NIGERIA
 # LTD" normalizes to "dstv nigeria" and matches "MTN NIGERIA PLC"

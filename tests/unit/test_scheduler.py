@@ -17,9 +17,7 @@ from app.core.scheduler import (
     stop_scheduler,
 )
 from app.models.bill import Bill
-from app.models.enums import AuditActor, AuditEventType, BillStatus
-from app.services.audit import write_audit
-
+from app.models.enums import BillStatus
 
 # ── Stub provider ───────────────────────────────────────────────────
 # The scheduler calls `get_payment_provider()` to fetch a real provider
@@ -220,10 +218,11 @@ def test_process_scheduled_bills_picks_up_due_bills(session, _scheduler_lifecycl
 
 
 def test_process_recurring_bills_spawns_next_occurrence(session, _scheduler_lifecycle) -> None:
+    from sqlmodel import select
+
     from app.core.database import session_scope
     from app.core.security import hash_password
     from app.models.user import User
-    from sqlmodel import select
 
     with session_scope() as s:
         user = User(

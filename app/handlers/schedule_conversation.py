@@ -585,7 +585,7 @@ async def handle_cancel(
     if query is not None:
         try:
             await query.answer()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         if hasattr(query, "edit_message_text"):
             await query.edit_message_text(

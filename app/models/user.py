@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import BigInteger, Column, Numeric, String
 from sqlmodel import Field, SQLModel
@@ -18,7 +17,7 @@ from sqlmodel import Field, SQLModel
 class User(SQLModel, table=True):
     __tablename__ = "users"
 
-    id: Optional[int] = Field(
+    id: int | None = Field(
         default=None,
         sa_column=Column(BigInteger, primary_key=True, autoincrement=True),
     )
@@ -31,7 +30,7 @@ class User(SQLModel, table=True):
         sa_column=Column(String(20), nullable=False, unique=True, index=True),
     )
     hashed_password: str = Field(max_length=255, nullable=False)
-    telegram_chat_id: Optional[str] = Field(
+    telegram_chat_id: str | None = Field(
         default=None,
         sa_column=Column(String(64), unique=True, index=True, nullable=True),
     )
@@ -41,7 +40,7 @@ class User(SQLModel, table=True):
         sa_column=Column(Numeric(14, 2), nullable=False, server_default="0"),
     )
     currency: str = Field(default="NGN", max_length=3, nullable=False)
-    address: Optional[str] = Field(default=None, sa_column=Column(String, nullable=True))
+    address: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     created_at: datetime = Field(default_factory=datetime.now, nullable=False)
     updated_at: datetime = Field(
         default_factory=datetime.now,

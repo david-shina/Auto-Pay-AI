@@ -11,16 +11,19 @@ We:
 8. Assert the bundle fetched the right data
 """
 import os
+
 os.environ['TELEGRAM_BOT_TOKEN'] = ''
 os.environ['ENVIRONMENT'] = 'test'
-import time, hashlib, hmac, json
 import subprocess
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+
 from app.main import app
+
 c = TestClient(app)
 email = f'fe2_{int(time.time())}@x.com'
 phone = f'+1{str(int(time.time()))[-10:]}'
@@ -32,11 +35,13 @@ r = c.post('/api/v1/auth/signup', json={
 tok = r.json()['access_token']
 ref = f'topup_e2e_{int(time.time()*1000)}'
 # Inject a transaction directly so the user has a row to fetch
-from app.core.database import session_scope
-from app.models.transaction import Transaction
-from app.models.enums import TransactionStatus, TransactionType
 from sqlalchemy import select as sa_select
+
+from app.core.database import session_scope
+from app.models.enums import TransactionStatus, TransactionType
+from app.models.transaction import Transaction
 from app.models.user import User
+
 with session_scope() as s:
     u = s.execute(sa_select(User).where(User.email == email)).scalar_one()
     u.balance = 7500
@@ -190,6 +195,7 @@ with tempfile.NamedTemporaryFile(
     f.write(node_script)
     sp = f.name
 import os
+
 env = os.environ.copy()
 env['SPA_HTML'] = html
 env['SPA_JS'] = js

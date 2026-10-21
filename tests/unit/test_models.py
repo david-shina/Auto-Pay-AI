@@ -26,8 +26,6 @@ from app.models import (
     User,
     VirtualAccount,
 )
-from app.models.bill import Bill as BillModel
-from app.models.transaction import Transaction as TxModel
 from app.models.user import User as UserModel
 
 
@@ -141,7 +139,6 @@ def test_transaction_indexes() -> None:
 
 def test_audit_log_metadata_column_named_metadata() -> None:
     """The Python attribute is event_metadata; the SQL column is 'metadata'."""
-    from sqlalchemy import JSON
 
     table = SQLModel.metadata.tables["audit_logs"]
     assert "metadata" in table.c

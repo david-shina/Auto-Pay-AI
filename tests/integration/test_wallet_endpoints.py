@@ -84,9 +84,8 @@ def test_create_telegram_link_code_requires_auth(client: TestClient) -> None:
 def test_unlink_telegram_clears_chat_id(
     client: TestClient, session: Session
 ) -> None:
-    from app.core.security import hash_password
-    from app.models.user import User
     from app.core.database import session_scope
+    from app.models.user import User
     h = _signup(client, email="ulnk@x.com", phone="08090000004")
     with session_scope() as s:
         u = s.exec(select(User).where(User.email == "ulnk@x.com")).first()
