@@ -335,16 +335,6 @@ GNU make is optional. `make help` lists the shortcuts (`up`, `test`, `migrate`, 
 
 Run a single app process: the scheduler and the Telegram bot live inside the app process, and a second worker would double-pay bills and fight over the Telegram webhook.
 
-### Production checklist
-
-- [ ] Rotate the credentials that were previously committed (see [Security](#security))
-- [ ] Set `ENVIRONMENT=production`
-- [ ] Set your own `DATABASE_URL`, `JWT_SECRET_KEY`, `BVN_ENCRYPTION_KEY`, `PAYSTACK_SECRET_KEY` (a live `sk_live_...` key), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_SECRET_TOKEN`
-- [ ] Set `WEBHOOK_URL=https://<host>/telegram/webhook`, and point Paystack's webhook URL at `https://<host>/webhooks/paystack`
-- [ ] Set `ALLOWED_ORIGINS` to your frontend's origin(s)
-- [ ] Keep `/metrics` on a private network
-- [ ] Enable `AUTO_PROVISION_DVA_ON_SIGNUP` only after Paystack approves Dedicated NUBAN for your business
-- [ ] Run one app process
 
 ## Known gaps
 
