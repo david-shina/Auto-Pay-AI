@@ -15,11 +15,11 @@ from app.services.payments.base import (
     WebhookEvent,
 )
 from app.services.payments.exceptions import (
-    AccountNameMismatch,
+    AccountNameMismatchError,
     AuthenticationError,
-    InsufficientFunds,
-    InvalidAccount,
-    KYCRequired,
+    InsufficientFundsError,
+    InvalidAccountError,
+    KYCRequiredError,
     PaymentError,
     ProviderError,
     WebhookSignatureError,
@@ -27,11 +27,11 @@ from app.services.payments.exceptions import (
 from app.services.payments.paystack import PaystackProvider, get_payment_provider
 
 __all__ = [
-    "AccountNameMismatch",
+    "AccountNameMismatchError",
     "AuthenticationError",
-    "InsufficientFunds",
-    "InvalidAccount",
-    "KYCRequired",
+    "InsufficientFundsError",
+    "InvalidAccountError",
+    "KYCRequiredError",
     "PaymentError",
     "PaymentProvider",
     "PaystackProvider",

@@ -42,13 +42,13 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 # ── JWT helpers ──────────────────────────────────────────────────────
 
-class JWTError_(Exception):  # noqa: N801
+class TokenError(Exception):
     """Raised when a JWT is invalid, expired, or tampered with."""
 
 
 def _require_secret() -> str:
     if not settings.jwt_secret_key:
-        raise JWTError_(
+        raise TokenError(
             "JWT_SECRET_KEY is not set. "
             "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\"",
         )
@@ -99,12 +99,12 @@ def create_refresh_token(
 
 
 def decode_token(token: str, expected_type: str = "access") -> dict[str, Any]:
-    """Decode + verify a JWT. Raises JWTError_ on any failure."""
+    """Decode + verify a JWT. Raises TokenError on any failure."""
     secret = _require_secret()
     try:
         payload = jwt.decode(token, secret, algorithms=[settings.jwt_algorithm])
     except JWTError as exc:
-        raise JWTError_(str(exc)) from exc
+        raise TokenError(str(exc)) from exc
     if payload.get("type") != expected_type:
-        raise JWTError_(f"expected token type {expected_type!r}, got {payload.get('type')!r}")
+        raise TokenError(f"expected token type {expected_type!r}, got {payload.get('type')!r}")
     return payload

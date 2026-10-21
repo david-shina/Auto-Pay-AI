@@ -15,8 +15,8 @@ import respx
 
 from app.services.payments import (
     AuthenticationError,
-    InvalidAccount,
-    KYCRequired,
+    InvalidAccountError,
+    KYCRequiredError,
     PaystackProvider,
     ProviderError,
     WebhookSignatureError,
@@ -123,7 +123,7 @@ async def test_resolve_account_invalid() -> None:
         )
     )
     p = _client()
-    with pytest.raises(InvalidAccount):
+    with pytest.raises(InvalidAccountError):
         await p.resolve_account(account_number="0000000000", bank_code="058")
 
 
@@ -270,7 +270,7 @@ async def test_kyc_required_error_mapping() -> None:
         )
     )
     p = _client()
-    with pytest.raises(KYCRequired):
+    with pytest.raises(KYCRequiredError):
         await p.initiate_transfer(
             amount_kobo=100, recipient_code="R", reference="r", reason="x"
         )

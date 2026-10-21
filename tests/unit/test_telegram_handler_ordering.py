@@ -24,6 +24,8 @@ keeps the tests fast and dependency-free.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 from telegram.ext import (
     CommandHandler,
@@ -98,7 +100,7 @@ def test_bill_entry_point_excludes_commands(built_app) -> None:
         # No entities — we only need the filter to decide that a
         # `/`-prefixed text is a command. PTB's `filters.COMMAND`
         # uses the message text and entities to detect this.
-        entities = []
+        entities: ClassVar[list] = []
 
     class _FakeUpdate:
         effective_message = _FakeMessage()

@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from app.core.security import (
-    JWTError_,
+    TokenError,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -49,7 +49,7 @@ def test_jwt_roundtrip() -> None:
 def test_jwt_tampered_rejected() -> None:
     token = create_access_token("1")
     tampered = token[:-2] + ("XX" if token[-2:] != "XX" else "YY")
-    with pytest.raises(JWTError_):
+    with pytest.raises(TokenError):
         decode_token(tampered)
 
 
@@ -61,14 +61,14 @@ def test_refresh_token_has_correct_type() -> None:
 
 def test_access_token_rejected_as_refresh() -> None:
     token = create_access_token("7")
-    with pytest.raises(JWTError_):
+    with pytest.raises(TokenError):
         decode_token(token, expected_type="refresh")
 
 
 def test_missing_secret_raises() -> None:
     with patch("app.core.security.settings") as m:
         m.jwt_secret_key = ""
-        with pytest.raises(JWTError_):
+        with pytest.raises(TokenError):
             create_access_token("1")
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from decimal import Decimal
+from typing import ClassVar
 
 import pytest
 
@@ -29,7 +30,7 @@ from app.models.enums import BillStatus
 class _StubProvider:
     """In-memory provider that records every call."""
     name = "paystack"
-    calls: list[tuple[str, dict]] = []
+    calls: ClassVar[list[tuple[str, dict]]] = []
 
     def __init__(self) -> None:
         self.calls = []

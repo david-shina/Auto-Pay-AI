@@ -58,7 +58,7 @@ from app.services.audit import audit_bill_created
 from app.services.date_parser import parse_bill_due_date
 from app.services.name_match import names_match
 from app.services.payments import (
-    InvalidAccount,
+    InvalidAccountError,
     PaymentError,
     PaymentProvider,
     get_payment_provider,
@@ -269,7 +269,7 @@ async def handle_resolve_account(
             account_number=account_number,
             bank_code=bank_code,
         )
-    except InvalidAccount as exc:
+    except InvalidAccountError as exc:
         await query.edit_message_text(
             f"❌ *Account could not be resolved*\n\n"
             f"`{escape_md(str(exc))}`\n\n"

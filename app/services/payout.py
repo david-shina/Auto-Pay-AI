@@ -40,9 +40,9 @@ from app.services.audit import (
 )
 from app.services.name_match import names_match
 from app.services.payments import (
-    AccountNameMismatch,
-    InsufficientFunds,
-    InvalidAccount,
+    AccountNameMismatchError,
+    InsufficientFundsError,
+    InvalidAccountError,
     PaymentError,
     PaymentProvider,
 )
@@ -208,7 +208,7 @@ async def execute_payout(
         resolved = await provider.resolve_account(
             account_number=bill.account_number, bank_code=bill.bank_code
         )
-    except InvalidAccount as exc:
+    except InvalidAccountError as exc:
         # Don't leak the raw provider message (e.g. "Invalid key",
         # "Account not found at bank 058") to the user. The full
         # detail goes to logs/audit; the user gets a clean message.
@@ -253,7 +253,7 @@ async def execute_payout(
             bank_code=bill.bank_code,
             account_name=resolved.account_name,
         )
-    except AccountNameMismatch as exc:
+    except AccountNameMismatchError as exc:
         # The provider returned a name that doesn't match the one we
         # already verified upstream. This is a defense-in-depth check;
         # the user gets the same friendly mismatch message as the
@@ -279,14 +279,17 @@ async def execute_payout(
         raise
 
     # ── 7. Initiate the transfer ───────────────────────────────────
+    # The provider's response is intentionally discarded: we already
+    # recorded `reference` (our idempotency key) on the debit row, and
+    # the outcome is confirmed asynchronously by the provider webhook.
     try:
-        transfer = await provider.initiate_transfer(
+        await provider.initiate_transfer(
             amount_kobo=_ngn_to_kobo(Decimal(str(bill.amount))),
             recipient_code=recipient_code,
             reference=reference,
             reason=f"AutoPay: {bill.vendor_name}",
         )
-    except InsufficientFunds as exc:
+    except InsufficientFundsError as exc:
         # Provider says our MERCHANT balance is too low. Refund user.
         await _refund_on_failure(
             session, user, bill, debit,

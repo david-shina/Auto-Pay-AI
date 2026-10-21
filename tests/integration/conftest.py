@@ -12,6 +12,7 @@ DB setup is one-time:
 from __future__ import annotations
 
 import os
+from typing import ClassVar
 
 import pytest
 
@@ -205,7 +206,7 @@ class _StubPaystack:
     """Default stub: create customer + DVA, everything else raises."""
 
     name = "paystack"
-    calls: list[tuple[str, dict]] = []
+    calls: ClassVar[list[tuple[str, dict]]] = []
     _counter: int = 0
 
     async def create_customer(self, **kwargs):

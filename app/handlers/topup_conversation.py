@@ -27,6 +27,7 @@ so the rules (min/max, audit, metrics) are identical to the API path.
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from decimal import Decimal, InvalidOperation
 
@@ -289,10 +290,8 @@ async def handle_cancel(
     """User tapped Cancel or sent /cancel mid-flow."""
     query = getattr(update, "callback_query", None) or update
     if hasattr(query, "answer"):
-        try:
+        with contextlib.suppress(Exception):
             await query.answer()
-        except Exception:
-            pass
     if hasattr(query, "edit_message_text"):
         await query.edit_message_text(
             "❌ Top-up cancelled. Run /topup whenever you're ready."
@@ -394,12 +393,11 @@ async def _init_topup(
     # `query` in the quick-pick path is the real CallbackQuery; in
     # the custom-amount path it's a `_MsgShim`. We resolve the chat
     # id differently for each.
-    if hasattr(query, "_msg"):
-        chat_id = str(query._msg.chat_id)  # type: ignore[attr-defined]
-    else:
-        # Real CallbackQuery: get the chat from the message it
-        # belongs to.
-        chat_id = str(query.message.chat_id)
+    chat_id = (
+        str(query._msg.chat_id)  # type: ignore[attr-defined]
+        if hasattr(query, "_msg")
+        else str(query.message.chat_id)
+    )
 
     user = get_linked_user(chat_id)
     if user is None:

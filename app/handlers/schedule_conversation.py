@@ -32,6 +32,7 @@ conversation?
 """
 from __future__ import annotations
 
+import contextlib
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -583,10 +584,8 @@ async def handle_cancel(
     """User tapped Cancel or sent /cancel mid-flow."""
     query = getattr(update, "callback_query", None)
     if query is not None:
-        try:
+        with contextlib.suppress(Exception):
             await query.answer()
-        except Exception:
-            pass
         if hasattr(query, "edit_message_text"):
             await query.edit_message_text(
                 "❌ Schedule cancelled. Run /schedule whenever you're ready."

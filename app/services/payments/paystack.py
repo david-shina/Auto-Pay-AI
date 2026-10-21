@@ -26,10 +26,10 @@ from app.services.payments.base import (
     WebhookEvent,
 )
 from app.services.payments.exceptions import (
-    AccountNameMismatch,
+    AccountNameMismatchError,
     AuthenticationError,
-    InvalidAccount,
-    KYCRequired,
+    InvalidAccountError,
+    KYCRequiredError,
     PaymentError,
     ProviderError,
     WebhookSignatureError,
@@ -41,6 +41,16 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 logger = logging.getLogger(__name__)
 
 PAYSTACK_BASE = "https://api.paystack.co"
+
+# Paystack transaction statuses, normalised to ours. `abandoned` means the
+# user never completed payment (no retry from us), so it maps to `failed`.
+_PAYSTACK_STATUS_MAP = {
+    "success": "success",
+    "pending": "pending",
+    "failed": "failed",
+    "abandoned": "failed",
+    "reversed": "reversed",
+}
 
 
 # ── Paystack-specific error mapping ─────────────────────────────────
@@ -60,19 +70,19 @@ def _map_paystack_error(status_code: int, body: dict) -> PaymentError:
         return AuthenticationError(message, provider="paystack", raw=raw)
 
     if "Account name" in message and "mismatch" in message.lower():
-        return AccountNameMismatch(message, provider="paystack", raw=raw)
+        return AccountNameMismatchError(message, provider="paystack", raw=raw)
 
     if "Insufficient" in message or "balance" in message.lower():
         # Paystack says "You have insufficient funds" when our merchant
         # balance is too low — rare in practice but possible.
-        from app.services.payments.exceptions import InsufficientFunds
-        return InsufficientFunds(message, provider="paystack", raw=raw)
+        from app.services.payments.exceptions import InsufficientFundsError
+        return InsufficientFundsError(message, provider="paystack", raw=raw)
 
     if "KYC" in message or "BVN" in message or "identity" in message.lower():
-        return KYCRequired(message, provider="paystack", raw=raw)
+        return KYCRequiredError(message, provider="paystack", raw=raw)
 
     if "resolve" in message.lower() or "invalid account" in message.lower():
-        return InvalidAccount(message, provider="paystack", raw=raw)
+        return InvalidAccountError(message, provider="paystack", raw=raw)
 
     return ProviderError(message, provider="paystack", raw=raw)
 
@@ -330,13 +340,6 @@ class PaystackProvider(PaymentProvider):
             f"/transaction/verify/{reference}",
         )
 
-        _PAYSTACK_STATUS_MAP = {
-            "success": "success",
-            "pending": "pending",
-            "failed": "failed",
-            "abandoned": "failed",
-            "reversed": "reversed",
-        }
         raw_status = str(data.get("status") or "").lower()
         normalized = _PAYSTACK_STATUS_MAP.get(raw_status, "unknown")
 

@@ -149,7 +149,7 @@ Deliberately separate from the ORM models so internal columns (`hashed_password`
 - **`payments/`** — the payment-gateway abstraction:
   - `base.py` — the `PaymentProvider` Protocol + frozen-dataclass DTOs (`VirtualAccountData`, `ResolvedAccount`, `TransferResult`, `WebhookEvent`). Business code depends **only** on this interface.
   - `paystack.py` — the concrete `PaystackProvider` implementation (HTTP calls, webhook signature verification, error mapping) + the `get_payment_provider()` factory.
-  - `exceptions.py` — typed exception hierarchy (`PaymentError` → `ProviderError`, `AuthenticationError`, `InvalidAccount`, `AccountNameMismatch`, `InsufficientFunds`, `KYCRequired`, `WebhookSignatureError`).
+  - `exceptions.py` — typed exception hierarchy (`PaymentError` → `ProviderError`, `AuthenticationError`, `InvalidAccountError`, `AccountNameMismatchError`, `InsufficientFundsError`, `KYCRequiredError`, `WebhookSignatureError`).
 
 #### `app/agents/` — LangGraph decision agent
 - **`state.py`** — `Decision` enum (`pay_now`/`schedule`/`hold`), `AgentState` TypedDict (all numerics as strings — LangGraph checkpoints don't round-trip `Decimal`), `DecisionResult`.
@@ -309,7 +309,7 @@ Once provisioned, the user transfers money to that dedicated account number from
 4. **Account resolution** (`GET /bank/resolve`) — looks up the real account name behind the destination account number/bank code. If the bill's stored vendor name doesn't match, this is logged (not hard-failed — vendor names are user-entered and often differ from the bank's official name).
 5. **Transfer recipient** (`POST /transferrecipient`) — Paystack requires a recipient object before a transfer; `create_transfer_recipient()` creates one from the resolved account.
 6. **Transfer** (`POST /transfer`, `source: "balance"`) — `initiate_transfer()` sends the amount in kobo with our own idempotent `reference` (format `autopay_<bill_id>_<uuid12>`), which Paystack echoes back and which becomes the join key for the eventual webhook.
-7. **Any typed `PaymentError`** raised at steps 4–6 (`InvalidAccount`, `AccountNameMismatch`, `InsufficientFunds` — meaning *Paystack's* merchant balance, not the user's — or a generic `ProviderError`) triggers `_refund_on_failure()`: the debit transaction is marked `failed` with a reason, the bill's `retry_count` increments (moving to `failed` once `max_retries` is hit, otherwise back to `scheduled`), and a `payout.failed` audit row is written. **The wallet balance is never touched in this path** — it was only ever "reserved" conceptually via the transaction row, not actually decremented yet.
+7. **Any typed `PaymentError`** raised at steps 4–6 (`InvalidAccountError`, `AccountNameMismatchError`, `InsufficientFundsError` — meaning *Paystack's* merchant balance, not the user's — or a generic `ProviderError`) triggers `_refund_on_failure()`: the debit transaction is marked `failed` with a reason, the bill's `retry_count` increments (moving to `failed` once `max_retries` is hit, otherwise back to `scheduled`), and a `payout.failed` audit row is written. **The wallet balance is never touched in this path** — it was only ever "reserved" conceptually via the transaction row, not actually decremented yet.
 8. **On success**, the wallet balance *is* now decremented by `amount + fee`, and the transaction stays in `processing` — final settlement is deferred to the webhook (step 5.4). The function returns `"Transfer initiated; awaiting provider confirmation."`, not `"paid."`
 
 ### 5.4 Outbound confirmation — `transfer.success` / `transfer.failed` / `transfer.reversed`
@@ -329,7 +329,7 @@ Both defenses are load-bearing and mandatory before any business logic runs:
 
 ### 5.6 Error mapping
 
-Paystack's error responses are just JSON with a human-readable `message` — there's no stable machine-readable error code in the free-tier API. `_map_paystack_error()` in `paystack.py` pattern-matches on the HTTP status and known message substrings (`"Invalid key"` → `AuthenticationError`, `"Account name...mismatch"` → `AccountNameMismatch`, `"Insufficient"`/`"balance"` → `InsufficientFunds`, `"KYC"`/`"BVN"`/`"identity"` → `KYCRequired`, account-resolution failures → `InvalidAccount`, everything else → generic `ProviderError`). This is inherently a little fragile (Paystack could change wording), but it means business code (`payout.py`) can `except InsufficientFunds` etc. instead of string-matching everywhere itself.
+Paystack's error responses are just JSON with a human-readable `message` — there's no stable machine-readable error code in the free-tier API. `_map_paystack_error()` in `paystack.py` pattern-matches on the HTTP status and known message substrings (`"Invalid key"` → `AuthenticationError`, `"Account name...mismatch"` → `AccountNameMismatchError`, `"Insufficient"`/`"balance"` → `InsufficientFundsError`, `"KYC"`/`"BVN"`/`"identity"` → `KYCRequiredError`, account-resolution failures → `InvalidAccountError`, everything else → generic `ProviderError`). This is inherently a little fragile (Paystack could change wording), but it means business code (`payout.py`) can `except InsufficientFundsError` etc. instead of string-matching everywhere itself.
 
 ### 5.7 Provider abstraction as a design choice
 

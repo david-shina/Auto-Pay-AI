@@ -23,6 +23,7 @@ import base64
 import logging
 import re
 from abc import ABC, abstractmethod
+from typing import ClassVar
 
 from app.core.config import settings
 from app.schemas.bill import BillExtractionResult
@@ -298,7 +299,7 @@ class ImageLoader(BaseLoader):
     with a clear message.
     """
 
-    SUPPORTED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+    SUPPORTED_MIME: ClassVar[set[str]] = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
     def __init__(self, data: bytes, mime_type: str = "image/png") -> None:
         self.data = data

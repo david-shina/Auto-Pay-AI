@@ -86,8 +86,18 @@ select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF"]
 ignore = ["E501", "B008", "B904"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["N802", "N803"]
+"tests/**" = ["N802", "N803", "RUF001", "RUF002"]
+"tests/manual/**" = ["E402"]
 "migrations/**" = ["E", "F"]
+# RUF001/RUF002: these files deliberately use typographic characters in
+# user-facing copy - U+2212 MINUS SIGN for negative amounts and U+2013
+# EN DASH for ranges ("10-11 digits", "N1,000 - N5,000"). Normalising them
+# to ASCII would change what users see and break the assertions that
+# pin the rendered output.
+"app/handlers/auth.py" = ["RUF001"]
+"app/handlers/schedule_conversation.py" = ["RUF001"]
+"app/handlers/topup_conversation.py" = ["RUF001"]
+"app/services/telegram.py" = ["RUF001"]
 
 [tool.mypy]
 python_version = "3.12"

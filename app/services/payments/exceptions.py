@@ -25,19 +25,19 @@ class AuthenticationError(PaymentError):
     """Bad/expired API key, missing required header, etc."""
 
 
-class InvalidAccount(PaymentError):
+class InvalidAccountError(PaymentError):
     """The account number/bank_code pair didn't resolve cleanly."""
 
 
-class AccountNameMismatch(PaymentError):
+class AccountNameMismatchError(PaymentError):
     """The account resolved, but the name didn't match the user on file."""
 
 
-class InsufficientFunds(PaymentError):
+class InsufficientFundsError(PaymentError):
     """The provider refused the transfer because our balance is too low."""
 
 
-class KYCRequired(PaymentError):
+class KYCRequiredError(PaymentError):
     """The provider requires more KYC info than we have on file."""
 
 

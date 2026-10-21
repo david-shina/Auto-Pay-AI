@@ -27,7 +27,7 @@ from sqlmodel import Session, select
 from app.core.config import settings
 from app.core.database import get_session
 from app.core.security import (
-    JWTError_,
+    TokenError,
     create_access_token,
     create_refresh_token,
     decode_token,
@@ -167,7 +167,7 @@ def rotate_tokens(
     is revoked atomically (revoke + insert in one transaction)."""
     try:
         payload = decode_token(refresh_token, expected_type="refresh")
-    except JWTError_ as exc:
+    except TokenError as exc:
         # Don't leak PyJWT internals (e.g. "Signature has expired",
         # "Not enough segments") to the user. Log for ops, return a
         # clean message.
@@ -282,7 +282,7 @@ def get_current_user(
     token = credentials.credentials
     try:
         payload = decode_token(token, expected_type="access")
-    except JWTError_ as exc:
+    except TokenError as exc:
         # Don't leak PyJWT internals (e.g. "Signature has expired",
         # "Not enough segments") to the user. Log for ops, return a
         # clean message.
