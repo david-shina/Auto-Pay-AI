@@ -22,9 +22,8 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
-from typing import Optional
 
 from fastapi import HTTPException, status
 from sqlmodel import Session, select
@@ -39,6 +38,7 @@ from app.services.audit import (
     audit_payout_succeeded,
     audit_wallet_debit,
 )
+from app.services.name_match import names_match
 from app.services.payments import (
     AccountNameMismatch,
     InsufficientFunds,
@@ -46,7 +46,7 @@ from app.services.payments import (
     PaymentError,
     PaymentProvider,
 )
-from app.services.name_match import names_match
+
 # Note: `notify_refund` is imported lazily inside `_refund_on_failure`
 # to avoid a circular import. `app.services.telegram` imports the
 # bot handlers (which import `execute_payout` from this module) at
@@ -84,7 +84,7 @@ async def execute_payout(
     *,
     bill_id: int,
     provider: PaymentProvider,
-    actor: "AuditActor" = AuditActor.USER,
+    actor: AuditActor = AuditActor.USER,
 ) -> PayoutResult:
     """Process a payout for `bill_id`.
 
@@ -209,13 +209,17 @@ async def execute_payout(
             account_number=bill.account_number, bank_code=bill.bank_code
         )
     except InvalidAccount as exc:
+        # Don't leak the raw provider message (e.g. "Invalid key",
+        # "Account not found at bank 058") to the user. The full
+        # detail goes to logs/audit; the user gets a clean message.
+        logger.warning("Account resolution failed for bill %d: %s", bill.id, exc)
         await _refund_on_failure(
             session, user, bill, debit, f"invalid_account: {exc}", actor=actor,
         )
         _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Account could not be resolved: {exc}",
+            detail="Could not verify the bank account. Please check the account number and bank.",
         ) from exc
 
     # If we have a stored account name, verify it matches the resolved
@@ -250,13 +254,22 @@ async def execute_payout(
             account_name=resolved.account_name,
         )
     except AccountNameMismatch as exc:
+        # The provider returned a name that doesn't match the one we
+        # already verified upstream. This is a defense-in-depth check;
+        # the user gets the same friendly mismatch message as the
+        # primary check above.
+        logger.warning("Provider-reported name mismatch for bill %d: %s", bill.id, exc)
         await _refund_on_failure(
             session, user, bill, debit, f"name_mismatch: {exc}", actor=actor,
         )
         _commit_or_warn(session)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Account name mismatch: {exc}",
+            detail=(
+                "Account name mismatch. The account holder's name on "
+                "file does not match this vendor. Please verify the "
+                "details and try again."
+            ),
         ) from exc
     except PaymentError as exc:
         await _refund_on_failure(
@@ -320,7 +333,7 @@ def _commit_or_warn(session: Session) -> None:
     safely — the audit is already durable."""
     try:
         session.commit()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("commit after refund failed (audit may be lost): %s", exc)
 
 
@@ -367,7 +380,7 @@ async def _refund_on_failure(
 
 # ── Recurrence helper (used after a successful payout) ──────────────
 
-def schedule_recurrence(session: Session, *, bill: Bill) -> Optional[Bill]:
+def schedule_recurrence(session: Session, *, bill: Bill) -> Bill | None:
     """Create the next bill in a recurring series. Returns it, or None
     if the bill is not recurring. Caller is responsible for committing.
 
@@ -404,6 +417,12 @@ def schedule_recurrence(session: Session, *, bill: Bill) -> Optional[Bill]:
     )
     session.add(next_bill)
     session.flush()
+    # The scheduler is the current caller of this recurrence helper.
+    # Bump the metric so recurring bills are visible in
+    # `app_bills_created_total{trigger="recurring"}`.
+    from app.core.metrics import record_bill_created
+
+    record_bill_created(trigger="recurring")
     return next_bill
 
 
@@ -414,8 +433,8 @@ def confirm_payout(
     *,
     provider_reference: str,
     success: bool,
-    failure_reason: Optional[str] = None,
-) -> Optional[PayoutResult]:
+    failure_reason: str | None = None,
+) -> PayoutResult | None:
     """Apply the final state transition when the provider webhook
     confirms the transfer. Returns the payout result for the caller
     to log/respond, or None if no matching transaction is found (a
@@ -461,6 +480,13 @@ def confirm_payout(
             bill_id=bill.id,
             provider_reference=provider_reference,
         )
+        # Metrics: bill paid via webhook-side confirmation. The
+        # scheduler's auto-pay path already emits its own record;
+        # this covers the manual / provider-direct success path.
+        from app.core.metrics import record_bill_paid, record_payout
+
+        record_bill_paid(trigger="auto_pay")
+        record_payout(result="success")
         message = "Payment successful."
     else:
         txn.status = TransactionStatus.FAILED.value
@@ -483,6 +509,10 @@ def confirm_payout(
             reason=failure_reason or "transfer_failed",
             retry_count=bill.retry_count,
         )
+        # Metrics: payout failed at the provider side.
+        from app.core.metrics import record_payout
+
+        record_payout(result="provider_error")
         message = f"Payment failed: {failure_reason or 'unknown reason'}."
 
     session.add(txn)

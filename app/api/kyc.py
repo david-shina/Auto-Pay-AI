@@ -4,6 +4,8 @@ Mounted at /api/v1/kyc in `app.main`.
 """
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import Session, select
 
@@ -19,6 +21,8 @@ from app.services.crypto import (
     hash_bvn,
     last4,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["kyc"])
 
@@ -47,9 +51,11 @@ def submit_bvn(
         ciphertext = encrypt_bvn(payload.bvn)
         bvn_hash = hash_bvn(payload.bvn)
     except BVNKeyError as exc:
+        # Never leak config / shell-command details to the user.
+        logger.exception("KYC encryption not configured for user %d", user.id)
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"KYC encryption not configured: {exc}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="KYC is temporarily unavailable. Please contact support.",
         ) from exc
 
     record = KycRecord(

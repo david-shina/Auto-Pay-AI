@@ -18,10 +18,16 @@ from app.core.config import settings
 # ── Password hashing ────────────────────────────────────────────────
 
 def hash_password(plain: str) -> str:
-    """Hash a plaintext password with bcrypt (cost factor 12)."""
+    """Hash a plaintext password with bcrypt.
+
+    The cost factor comes from `settings.bcrypt_rounds` (12 by
+    default). The test suite lowers it so the suite does not spend
+    most of its time hashing throwaway passwords; the configuration
+    validator refuses a low cost outside the test environment.
+    """
     if not plain:
         raise ValueError("password must be non-empty")
-    salt = bcrypt.gensalt(rounds=12)
+    salt = bcrypt.gensalt(rounds=settings.bcrypt_rounds)
     return bcrypt.hashpw(plain.encode("utf-8"), salt).decode("utf-8")
 
 

@@ -21,14 +21,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Optional
 
 from sqlmodel import Session
 
 from app.models.bill import Bill
 from app.models.enums import BillStatus
 from app.services.audit import audit_bill_created
-
 
 # Cap on a single scheduled bill. Anything larger needs an
 # admin-issued manual top-up. Matches the rest of the app's
@@ -51,10 +49,10 @@ class ScheduleBillInput:
     vendor_name: str
     amount: Decimal
     due_date: datetime
-    account_number: Optional[str] = None
-    bank_code: Optional[str] = None
-    bank_name: Optional[str] = None
-    recurrence_interval: Optional[str] = None  # "weekly" | "monthly" | None
+    account_number: str | None = None
+    bank_code: str | None = None
+    bank_name: str | None = None
+    recurrence_interval: str | None = None  # "weekly" | "monthly" | None
 
 
 def create_scheduled_bill(
@@ -155,12 +153,17 @@ def create_scheduled_bill(
     )
     session.commit()
     session.refresh(bill)
+    # Telegram /schedule is the current caller; future API endpoints
+    # that create scheduled bills will also be counted here.
+    from app.core.metrics import record_bill_created
+
+    record_bill_created(trigger="telegram")
     return bill
 
 
 __all__ = [
-    "MIN_BILL_NGN",
     "MAX_BILL_NGN",
+    "MIN_BILL_NGN",
     "BillValidationError",
     "ScheduleBillInput",
     "create_scheduled_bill",

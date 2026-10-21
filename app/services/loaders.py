@@ -20,15 +20,12 @@ All loaders are async and accept raw bytes (so the FastAPI
 from __future__ import annotations
 
 import base64
-import io
 import logging
-import os
 import re
 from abc import ABC, abstractmethod
-from typing import Optional
 
-from app.schemas.bill import BillExtractionResult
 from app.core.config import settings
+from app.schemas.bill import BillExtractionResult
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +57,7 @@ def _get_llm_client():
 
 
 
-def _llm_extract(system: str, user: str) -> Optional[BillExtractionResult]:
+def _llm_extract(system: str, user: str) -> BillExtractionResult | None:
     """Call Groq with structured output. Returns None on any failure."""
     client = _get_llm_client()
     if client is None:
@@ -74,7 +71,7 @@ def _llm_extract(system: str, user: str) -> Optional[BillExtractionResult]:
                 {"role": "user", "content": user},
             ],
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("LLM extraction failed: %s", exc)
         return None
     return result
@@ -82,16 +79,112 @@ def _llm_extract(system: str, user: str) -> Optional[BillExtractionResult]:
 
 # ── Heuristic fallback ──────────────────────────────────────────────
 
+# Curated list of common Nigerian billers. Order matters: longer names
+# first so a more specific match (e.g. "EKEDC") doesn't get shadowed
+# by a substring (e.g. "EDC"). All lowercase — `_detect_vendor` does
+# the case-insensitive scan.
+_NG_BILLERS: tuple[str, ...] = (
+    # Telecom
+    "mtn nigeria", "airtel nigeria", "globacom limited", "9mobile",
+    "smile communications", "spectranet", "swift networks",
+    "mtn", "airtel", "glo", "9mobile",
+    # Pay TV / streaming
+    "showmax", "dstv nigeria", "gotv nigeria",
+    "dstv", "gotv", "netflix",
+    # Power (DISCOS)
+    "ekedc", "ikedc", "aedc", "phed", "kedc", "nedc", "eedc", "jedi",
+    "phcn", "nepa",
+    # Cable / ISP / water
+    "wace", "waec", "neco", "jamb",
+    # Banks (for transfers)
+    "gtbank", "zenith", "uba", "access", "first bank", "fidelity",
+)
+
+
+def _detect_vendor(text: str) -> str:
+    """Scan `text` for known Nigerian biller names. Returns the matched
+    name in uppercase, or "" if no match.
+
+    Cheap O(n*m) loop is fine — `text` is at most a few KB of OCR'd
+    bill text and the biller list is ~30 entries.
+    """
+    if not text:
+        return ""
+    lowered = text.lower()
+    for name in _NG_BILLERS:
+        if name in lowered:
+            return name.upper()
+    return ""
+
+
 def _regex_extract(text: str) -> BillExtractionResult:
-    """Best-effort bill extraction when no LLM is available."""
+    """Best-effort bill extraction when no LLM is available.
+
+    Picks up the amount (via `_AMOUNT_RE`) and a known biller name
+    (via `_detect_vendor`). The biller keyword list covers the top
+    Nigerian billers; arbitrary vendor names still require the LLM.
+    """
     amount_match = _AMOUNT_RE.search(text)
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
-    date_match = _DATE_RE.search(text)
     return BillExtractionResult(
-        vendor_name="",  # the LLM does this; regex can't reliably pick a vendor
+        vendor_name=_detect_vendor(text),
         amount=amount,
         raw_text=text,
     )
+
+
+# ── Local OCR fallback (RapidOCR / ONNX Runtime) ─────────────────────
+#
+# When the Groq LLM is down or the API key is missing, we still want
+# image uploads to produce *something*. RapidOCR runs PaddleOCR's
+# models on ONNX Runtime — same accuracy, no PaddlePaddle framework
+# dependency, models bundled in the wheel.
+
+# Module-level engine cache so we only load the ~200MB models once
+# per process. The first image upload pays the warm-up cost (~3s on
+# CPU); subsequent calls are sub-second.
+_ocr_engine: object | None = None
+_ocr_engine_load_failed = False
+
+
+def _get_ocr_engine():
+    """Lazy-init the RapidOCR engine. Returns None if the package
+    isn't installed (e.g. the OCR extras weren't installed) or the
+    model load failed on this platform."""
+    global _ocr_engine, _ocr_engine_load_failed
+    if _ocr_engine is not None:
+        return _ocr_engine
+    if _ocr_engine_load_failed:
+        return None
+    try:
+        from rapidocr import RapidOCR  # type: ignore
+
+        _ocr_engine = RapidOCR()
+    except Exception as exc:
+        logger.warning("RapidOCR engine failed to load: %s", exc)
+        _ocr_engine_load_failed = True
+        return None
+    return _ocr_engine
+
+
+def _ocr_extract(data: bytes) -> str:
+    """Run local OCR on raw image bytes. Returns the concatenated
+    recognized text, or "" on any failure (no engine, bad image,
+    empty result). Never raises."""
+    engine = _get_ocr_engine()
+    if engine is None:
+        return ""
+    try:
+        result = engine(data)
+    except Exception as exc:
+        logger.warning("OCR fallback failed: %s", exc)
+        return ""
+    if result is None:
+        return ""
+    txts = getattr(result, "txts", None)
+    if not txts:
+        return ""
+    return "\n".join(txts)
 
 
 # ── Base class ──────────────────────────────────────────────────────
@@ -140,7 +233,7 @@ class PDFLoader(BaseLoader):
 
     def __init__(self, data: bytes) -> None:
         self.data = data
-        self._text: Optional[str] = None
+        self._text: str | None = None
 
     def _extract_text(self) -> str:
         if self._text is not None:
@@ -184,9 +277,26 @@ class PDFLoader(BaseLoader):
 # ── Image loader ────────────────────────────────────────────────────
 
 class ImageLoader(BaseLoader):
-    """Image-based bill. Sends the image to a vision-capable LLM
-    (Groq's `llama-3.2-90b-vision-preview` if available; falls back
-    to heuristic extraction)."""
+    """Image-based bill. Three-tier extraction:
+
+    1. **LLM (vision)** — best quality; sends the image to Groq's
+       vision-capable model. Used when `GROQ_API_KEY` is set and the
+       API is reachable.
+    2. **Local OCR → LLM (text)** — if the vision LLM fails (down,
+       rate-limited, etc.), run RapidOCR locally to extract raw text
+       from the image, then pass that text to the LLM as a regular
+       text extraction. Gives the LLM a second chance with cleaner
+       input.
+    3. **Local OCR → regex** — if the LLM is also down for text,
+       parse the OCR'd text with `_regex_extract` + the Nigerian
+       biller keyword list. The result may be incomplete (no vendor
+       name for unknown billers) but at least the amount and known
+       biller are filled in.
+
+    If both the LLM and the local OCR engine are unavailable (e.g.
+    the OCR extras weren't installed), `extract` raises `ValueError`
+    with a clear message.
+    """
 
     SUPPORTED_MIME = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 
@@ -194,56 +304,76 @@ class ImageLoader(BaseLoader):
         self.data = data
         self.mime_type = mime_type if mime_type in self.SUPPORTED_MIME else "image/png"
 
-    async def extract(self) -> BillExtractionResult:
-        client = _get_llm_client()
-        if client is None:
-            raise ValueError("Image extraction requires GROQ_API_KEY to be set.")
+    _IMAGE_PROMPT = (
+        "Extract bill details from this image. "
+        "Leave fields null if not visible. "
+        "Important note: all currency is in NGN (Nigerian Naira). "
+        "For the `due_date` field, ALWAYS return an ISO 8601 date "
+        "string in the form `YYYY-MM-DD` (or null if not visible). "
+        "Do not return times, timezones, or natural-language "
+        "phrases like 'next Friday'."
+    )
 
+    async def extract(self) -> BillExtractionResult:
         b64 = base64.b64encode(self.data).decode("ascii")
         data_url = f"data:{self.mime_type};base64,{b64}"
 
-        try:
-            # The instructor wrapper wants a model that supports vision.
-            # Use a vision-capable Groq model; fall back to the text
-            # model if not available.
-            result = client.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                response_model=BillExtractionResult,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": (
-                                    "Extract bill details from this image. "
-                                    "Leave fields null if not visible. "
-                                    "Important note: all currency is in NGN "
-                                    "(Nigerian Naira). For the `due_date` "
-                                    "field, ALWAYS return an ISO 8601 date "
-                                    "string in the form `YYYY-MM-DD` "
-                                    "(or null if not visible). Do not return "
-                                    "times, timezones, or natural-language "
-                                    "phrases like 'next Friday'."
-                                ),
-                            },
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                        ],
-                    }
-                ],
-                strict=True
+        # ── Tier 1: vision LLM ─────────────────────────────────────
+        client = _get_llm_client()
+        if client is not None:
+            try:
+                result = client.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    response_model=BillExtractionResult,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": self._IMAGE_PROMPT},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ],
+                        }
+                    ],
+                    strict=True,
+                )
+                return result
+            except Exception as exc:
+                logger.warning("Vision LLM failed, trying OCR fallback: %s", exc)
+
+        # ── Tier 2: local OCR → LLM (text) ─────────────────────────
+        ocr_text = _ocr_extract(self.data)
+        if ocr_text.strip() and client is not None:
+            result = _llm_extract(
+                system=(
+                    "You are an expert financial auditor. Extract bill details "
+                    "accurately. Leave fields null if not present in the text. "
+                    "For the `due_date` field, ALWAYS return an ISO 8601 date "
+                    "string in the form `YYYY-MM-DD` (or null). Do not return "
+                    "times, timezones, or natural-language phrases."
+                ),
+                user=f"Extract details from this bill text:\n\n{ocr_text[:8000]}",
             )
-            return result
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Vision LLM extraction failed: %s", exc)
-            raise ValueError(f"Could not extract bill from image: {exc}") from exc
+            if result is not None:
+                result.raw_text = ocr_text
+                return result
+
+        # ── Tier 3: local OCR → regex ──────────────────────────────
+        if ocr_text.strip():
+            return _regex_extract(ocr_text)
+
+        # No LLM, no OCR text — nothing we can do.
+        raise ValueError(
+            "Could not extract bill from image: no LLM available and local "
+            "OCR did not return any text. Set GROQ_API_KEY or install the "
+            "OCR fallback (rapidocr + onnxruntime)."
+        )
 
 
 # ── Factory ─────────────────────────────────────────────────────────
 
 def loader_from_upload(
     filename: str,
-    content_type: Optional[str],
+    content_type: str | None,
     data: bytes,
 ) -> BaseLoader:
     """Pick a loader based on filename / content-type."""

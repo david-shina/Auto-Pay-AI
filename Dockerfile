@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1.7
 
+# Optional extras to install, e.g. `dev` for the test image. Empty for
+# the production image.
+ARG EXTRAS=""
+
 # ─── Stage 1: builder ──────────────────────────────────────────────
 FROM python:3.12-slim AS builder
+
+ARG EXTRAS
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -16,6 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml ./
+# Build wheels for everything the project needs. The three packages
+# below are the ones that may need to be compiled from source; the
+# rest resolve to prebuilt wheels.
 RUN pip install --upgrade pip setuptools wheel \
     && pip wheel --wheel-dir=/wheels \
        "bcrypt==4.2.1" \
@@ -23,10 +32,30 @@ RUN pip install --upgrade pip setuptools wheel \
        "cryptography==44.0.0"
 
 COPY . /build
-RUN pip install --no-deps --no-index --find-links=/wheels .
+# Build the project wheel *and* its dependencies into /wheels, so the
+# runtime stage can install everything offline. (The previous
+# `--no-deps` install skipped the dependencies entirely, which left
+# the image without FastAPI, SQLModel, and friends.)
+#
+# `rapidocr` depends on the GUI build of OpenCV, which needs X11
+# libraries (`libxcb`, `libGL`) that a slim image does not have. Both
+# variants install the same `cv2` module, so we drop the GUI build and
+# reinstall the headless one - the one this project actually declares.
+RUN set -eux; \
+    if [ -n "$EXTRAS" ]; then \
+        pip wheel --wheel-dir=/wheels ".[$EXTRAS]"; \
+        pip install --no-index --find-links=/wheels "auto-pay-ai[$EXTRAS]"; \
+    else \
+        pip wheel --wheel-dir=/wheels .; \
+        pip install --no-index --find-links=/wheels "auto-pay-ai"; \
+    fi; \
+    pip uninstall -y opencv-python; \
+    pip install --no-index --find-links=/wheels --force-reinstall opencv-python-headless
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
+
+ARG EXTRAS
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -45,6 +74,10 @@ WORKDIR /code
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY --chown=autopay:autopay . /code
+# `COPY --chown` sets the ownership of the copied *contents*, not of
+# /code itself - which WORKDIR created as root. Without this the
+# non-root `autopay` user cannot write to its working directory.
+RUN chown -R autopay:autopay /code
 
 USER autopay
 

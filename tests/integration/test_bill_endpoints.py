@@ -1,19 +1,15 @@
 """Integration tests for the bills endpoints."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
-from app.core.security import hash_password
 from app.models.bill import Bill
 from app.models.enums import BillStatus
 from app.models.user import User
-from app.services.audit import audit_wallet_credit
-from app.models.transaction import Transaction
-from app.models.enums import TransactionType, TransactionStatus
 
 
 def _auth_header(client: TestClient, email: str = "ada@example.com", phone: str = "08031112233") -> str:
@@ -38,7 +34,7 @@ def test_create_bill_via_json(client: TestClient, stub_provider) -> None:
         json={
             "vendor_name": "DSTV",
             "amount": 5000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=2)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=2)).isoformat(),
             "account_number": "0123456789",
             "bank_code": "058",
             "bank_name": "GTBank",
@@ -60,7 +56,7 @@ def test_list_bills_returns_only_own(client: TestClient, stub_provider, session:
         json={
             "vendor_name": "DSTV",
             "amount": 5000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=2)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=2)).isoformat(),
         },
         headers={"Authorization": h1},
     )
@@ -70,7 +66,7 @@ def test_list_bills_returns_only_own(client: TestClient, stub_provider, session:
         json={
             "vendor_name": "PHCN",
             "amount": 1000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=2)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=2)).isoformat(),
         },
         headers={"Authorization": h2},
     )
@@ -93,7 +89,7 @@ def test_get_bill_404_for_other_users_bill(client: TestClient, stub_provider) ->
         json={
             "vendor_name": "DSTV",
             "amount": 5000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=2)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=2)).isoformat(),
         },
         headers={"Authorization": h1},
     )
@@ -117,7 +113,7 @@ def test_pay_bill_deducts_balance(client: TestClient, stub_provider, session: Se
         json={
             "vendor_name": "DSTV",
             "amount": 5000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=1)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=1)).isoformat(),
             "account_number": "0123456789",
             "bank_code": "058",
             "bank_name": "GTBank",
@@ -148,7 +144,7 @@ def test_pay_bill_402_on_insufficient_balance(client: TestClient, stub_provider)
         json={
             "vendor_name": "DSTV",
             "amount": 50000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=1)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=1)).isoformat(),
             "account_number": "0123456789",
             "bank_code": "058",
             "bank_name": "GTBank",
@@ -167,7 +163,7 @@ def test_cancel_bill(client: TestClient, stub_provider) -> None:
         json={
             "vendor_name": "DSTV",
             "amount": 5000,
-            "due_date": (datetime.now(tz=timezone.utc) + timedelta(days=10)).isoformat(),
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=10)).isoformat(),
         },
         headers={"Authorization": h},
     )
@@ -203,3 +199,41 @@ def test_upload_bill_400_without_file_or_text(client: TestClient, stub_provider)
     h = _auth_header(client)
     r = client.post("/api/v1/bills/upload", headers={"Authorization": h})
     assert r.status_code == 400
+
+
+def test_upload_bill_image_with_no_llm_uses_ocr_or_fails_gracefully(
+    client: TestClient, stub_provider, monkeypatch
+) -> None:
+    """Image upload with the LLM client stubbed to None (forcing the
+    OCR fallback path) must not crash. The endpoint either:
+
+    * Returns 201 if the OCR + regex chain produces a valid result
+      (a known biller + amount in the OCR'd text), OR
+    * Returns 422 with a clear "could not determine vendor and
+      amount" message (the OCR'd text was empty or contained no
+      known biller).
+
+    The 500/crash path is the regression we're guarding against.
+    """
+    from app.services import loaders
+
+    monkeypatch.setattr(loaders, "_get_llm_client", lambda: None)
+    # Use a tiny valid PNG (1x1 transparent). OCR will return
+    # empty text; the endpoint should 422 with a clear message.
+    import base64
+    png = base64.b64decode(
+        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    )
+    h = _auth_header(client, email="ocr@x.com", phone="08090000099")
+    r = client.post(
+        "/api/v1/bills/upload",
+        files={"file": ("test.png", png, "image/png")},
+        headers={"Authorization": h},
+    )
+    # Either 422 (clean fallback) — NEVER 500 (crash). The 1x1 PNG
+    # contains no text, so OCR returns empty and the regex fallback
+    # also yields nothing usable → 422 is the expected response.
+    assert r.status_code in (422, 201), (
+        f"Unexpected status {r.status_code}: {r.text}. "
+        "A 500 here means the OCR fallback threw an unhandled exception."
+    )

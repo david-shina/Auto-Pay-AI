@@ -124,6 +124,46 @@ def test_scheduler_is_idempotent(_scheduler_lifecycle) -> None:
     stop_scheduler()
 
 
+def test_scheduled_jobs_are_active(_scheduler_lifecycle) -> None:
+    """The jobs must actually be scheduled.
+
+    APScheduler treats `next_run_time=None` as "add the job paused",
+    so a job registered that way never fires. That silently disabled
+    auto-pay; this test pins the behaviour down.
+    """
+    start_scheduler()
+    jobs = {job.id: job for job in get_scheduler().get_jobs()}
+    assert "process_scheduled_bills" in jobs
+    assert "process_recurring_bills" in jobs
+    for job_id, job in jobs.items():
+        assert job.next_run_time is not None, (
+            f"job {job_id} is paused - it would never run"
+        )
+
+
+def test_scheduler_jobs_are_skipped_when_disabled(
+    _scheduler_lifecycle, monkeypatch
+) -> None:
+    """`SCHEDULER_ENABLED=false` turns the job body into a no-op."""
+    from app.core import scheduler as scheduler_module
+    from app.core.config import settings
+
+    calls: list[str] = []
+
+    async def _job() -> None:
+        calls.append("ran")
+
+    wrapper = scheduler_module._run_sync_in_private_loop("test_job", _job)
+
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
+    wrapper()
+    assert calls == []
+
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    wrapper()
+    assert calls == ["ran"]
+
+
 def test_process_scheduled_bills_picks_up_due_bills(session, _scheduler_lifecycle) -> None:
     """A bill with `status='scheduled'` and `due_date <= now` should be
     auto-paid: re-evaluated → PAY_NOW → execute_payout() →

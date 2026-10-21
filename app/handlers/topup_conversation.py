@@ -91,13 +91,20 @@ def quick_pick_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def done_keyboard() -> InlineKeyboardMarkup:
+def done_keyboard(pending_reference: str | None = None) -> InlineKeyboardMarkup:
     """Keyboard shown after a top-up URL is delivered. Instead of
     a dead-end Done button, give the user something to do next:
     top up again, check their balance, or close out the menu. The
     webhook will credit the wallet asynchronously; the user can
-    come back later to /transactions to see the new row."""
-    return InlineKeyboardMarkup([
+    come back later to /transactions to see the new row.
+
+    If `pending_reference` is set, also show an "I've paid" button
+    that calls the manual-verify endpoint via the bot. This is the
+    fallback path used when the provider's webhook delivery is
+    delayed or unavailable (e.g. organizer hasn't validated the
+    webhook URL yet).
+    """
+    rows: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
                 "💸 Top up again", callback_data="topup_done_again"
@@ -106,8 +113,21 @@ def done_keyboard() -> InlineKeyboardMarkup:
                 "💼 Check balance", callback_data="topup_done_balance"
             ),
         ],
-        [InlineKeyboardButton("✅ Done", callback_data="topup_done_close")],
-    ])
+    ]
+    if pending_reference:
+        # Stash the reference in the callback data so the handler
+        # can call verify_pending_topup with it.
+        rows.insert(
+            0,
+            [InlineKeyboardButton(
+                "✅ I've paid — verify now",
+                callback_data=f"topup_verify:{pending_reference}",
+            )],
+        )
+    rows.append(
+        [InlineKeyboardButton("✅ Done", callback_data="topup_done_close")]
+    )
+    return InlineKeyboardMarkup(rows)
 
 
 # ── Step 1: /topup entry point ─────────────────────────────────────
@@ -421,10 +441,14 @@ async def _init_topup(
         f"Reference: `{escape_md(result.reference)}`\n\n"
         f"Open this link in your browser to pay:\n"
         f"{result.authorization_url}\n\n"
-        f"✅ Your wallet will be credited automatically when Paystack "
-        f"confirms. You can close this chat — we'll notify you when it lands."
+        f"✅ Your wallet will be credited automatically when the "
+        f"provider confirms. If you don't see the credit within a "
+        f"minute, tap *I've paid* below to verify manually."
     )
-    await _reply(query, edit, text, reply_markup=done_keyboard())
+    await _reply(
+        query, edit, text,
+        reply_markup=done_keyboard(pending_reference=result.reference),
+    )
     # Stay in the conversation at TOPUP_DONE so the follow-up
     # handlers (handle_done_again / handle_done_balance /
     # handle_done_close) can fire. When the user finally picks one,
@@ -443,6 +467,105 @@ async def _reply(query, edit: bool, text: str, **kwargs) -> None:
         target = getattr(query, "_msg", None) or getattr(query, "message", None)
         if target is not None and hasattr(target, "reply_text"):
             await target.reply_text(text, **kwargs)
+
+
+# ── "I've paid" manual verify handler ────────────────────────────
+
+
+async def handle_verify(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """User tapped the "I've paid" button. Call the provider's
+    transaction-status endpoint and apply the credit if settled.
+
+    This is the manual-verify fallback for the case when the
+    provider's webhook delivery is delayed or unavailable. The
+    scheduler also runs the same code path every 30s, but this
+    handler gives the user a one-tap UX without waiting for the
+    next tick.
+    """
+    from app.services.payments import get_payment_provider
+    from app.services.wallet import verify_pending_topup
+
+    query = update.callback_query
+    await query.answer("Verifying with the provider…")
+    # Pull the reference out of the callback data.
+    ref = (query.data or "").replace("topup_verify:", "", 1)
+    if not ref:
+        await query.edit_message_text(
+            "⚠️ Couldn't read the reference. Please try again."
+        )
+        return ConversationHandler.END
+
+    chat_id = str(query.message.chat_id)
+    user = get_linked_user(chat_id)
+    if user is None:
+        await query.edit_message_text(
+            "🔒 Account not linked. Run /link first."
+        )
+        return ConversationHandler.END
+
+    provider = _payments_pkg.get_payment_provider()
+    try:
+        with session_scope() as session:
+            result = await verify_pending_topup(
+                session, user=user, reference=ref, provider=provider,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("handle_verify failed for user %d ref %s", user.id, ref)
+        await query.edit_message_text(
+            "❌ Verification failed. Please try again in a moment."
+        )
+        return TOPUP_DONE
+
+    if result.credited:
+        await query.edit_message_text(
+            f"✅ *Payment confirmed!*\n\n"
+            f"Your wallet is now *₦{float(result.new_balance):,.2f}*.",
+            parse_mode="Markdown",
+        )
+    elif result.status == "already_credited":
+        await query.edit_message_text(
+            f"✅ Already credited — your wallet is "
+            f"*₦{float(result.new_balance):,.2f}*.",
+            parse_mode="Markdown",
+        )
+    elif result.status == "provider_pending":
+        await query.edit_message_text(
+            "⏳ *Still pending.*\n\n"
+            "The provider hasn't confirmed the payment yet. "
+            "Give it a few seconds and tap *I've paid* again.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(
+                    "✅ I've paid — verify now",
+                    callback_data=f"topup_verify:{ref}",
+                )],
+                [InlineKeyboardButton("✅ Done", callback_data="topup_done_close")],
+            ]),
+        )
+    elif result.status == "provider_failed":
+        await query.edit_message_text(
+            "❌ *Payment failed.*\n\n"
+            "The provider says the payment didn't go through. "
+            "Please retry from /topup.",
+            parse_mode="Markdown",
+        )
+    elif result.status == "provider_reversed":
+        await query.edit_message_text(
+            "↩️ *Payment reversed.*\n\n"
+            "The provider reversed this payment. Your wallet was "
+            "not credited. Contact support if this is wrong.",
+            parse_mode="Markdown",
+        )
+    else:  # unknown_reference / provider_unknown
+        await query.edit_message_text(
+            "⚠️ *Couldn't verify.*\n\n"
+            "We couldn't find that top-up. Double-check the reference "
+            "or wait a moment and try again.",
+            parse_mode="Markdown",
+        )
+    return TOPUP_DONE
 
 
 # ── ConversationHandler factory ───────────────────────────────────
@@ -472,6 +595,9 @@ def build_topup_conversation() -> ConversationHandler:
                 CallbackQueryHandler(handle_done_again, pattern=r"^topup_done_again$"),
                 CallbackQueryHandler(handle_done_balance, pattern=r"^topup_done_balance$"),
                 CallbackQueryHandler(handle_done_close, pattern=r"^topup_done_close$"),
+                CallbackQueryHandler(
+                    handle_verify, pattern=r"^topup_verify:.+$"
+                ),
             ],
         },
         fallbacks=[CommandHandler("cancel", cancel_command)],

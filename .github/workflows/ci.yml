@@ -32,6 +32,9 @@ jobs:
       ENVIRONMENT: test
       LOG_LEVEL: WARNING
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/autopay_test
+      # The suite refuses to run against a database whose name does not
+      # contain "test" — it truncates every table between tests.
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/autopay_test
       JWT_SECRET_KEY: ci-test-jwt-secret-must-be-at-least-32-chars-long
       JWT_ALGORITHM: HS256
       JWT_ACCESS_TTL_MIN: 15
@@ -43,6 +46,10 @@ jobs:
       GOOGLE_API_KEY: ""
       LANGCHAIN_API_KEY: ""
       LANGCHAIN_TRACING_V2: "false"
+      TELEGRAM_BOT_TOKEN: ""
+      TELEGRAM_SECRET_TOKEN: ""
+      WEBHOOK_URL: ""
+      SCHEDULER_ENABLED: "false"
       PAYOUT_FEE_NGN: "50.00"
       POSTGRES_PASSWORD: postgres
       POSTGRES_USER: postgres
@@ -66,7 +73,7 @@ jobs:
 
       - name: Apply schema
         run: |
-          PGPASSWORD=postgres psql -h localhost -U postgres -d autopay_test -f schema.sql
+          alembic upgrade head
 
       - name: Lint (ruff)
         run: |

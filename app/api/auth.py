@@ -147,6 +147,7 @@ async def _try_provision_dva(
         user_id=user.id,
         provider=provider.name,
         provider_account_reference=va_data.provider_reference,
+        provider_customer_code=customer_code,
         account_number=va_data.account_number,
         account_name=va_data.account_name,
         bank_name=va_data.bank_name,

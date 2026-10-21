@@ -1,10 +1,24 @@
-.PHONY: help up down logs restart build rebuild psql test test-unit test-integration lint format typecheck migrate seed clean nuke db-init db-reset db-shell cov ngrok keygen webhooks
+.PHONY: help up up-d down logs logs-app logs-db psql shell restart build rebuild test test-unit test-integration lint format typecheck migrate migrate-new migrate-down seed clean nuke db-create db-init db-reset db-shell cov cov-html cov-clear keygen webhooks
 
 # ─── Defaults ───────────────────────────────────────────────────────
 COMPOSE         := docker compose
-COMPOSE_TEST    := docker compose -f docker-compose.test.yml --env-file .env.test
+COMPOSE_TEST    := docker compose -f docker-compose.test.yml
 APP_SERVICE     := app
 DB_SERVICE      := db
+
+# Use the project's virtualenv when it exists, otherwise whatever
+# `python` is on PATH.
+PYTHON := $(shell if [ -x .venv/bin/python ]; then echo .venv/bin/python; \
+	elif [ -x .venv/Scripts/python.exe ]; then echo .venv/Scripts/python.exe; \
+	else echo python; fi)
+
+# Local PostgreSQL connection settings. The password is never stored
+# here — set PGPASSWORD in your shell (or use ~/.pgpass).
+PGHOST     ?= localhost
+PGPORT     ?= 5432
+PGUSER     ?= postgres
+PGDATABASE ?= autopay
+PGTESTDB   ?= autopay_test
 
 # ─── Help ───────────────────────────────────────────────────────────
 help:  ## Show this help
@@ -30,7 +44,7 @@ logs-db:  ## Tail logs from db only
 	$(COMPOSE) logs -f $(DB_SERVICE)
 
 psql:  ## Open psql shell inside db container
-	$(COMPOSE) exec $(DB_SERVICE) psql -U $$POSTGRES_USER -d $$POSTGRES_DB
+	$(COMPOSE) exec $(DB_SERVICE) psql -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-autopay}
 
 shell:  ## Open bash inside app container
 	$(COMPOSE) exec $(APP_SERVICE) /bin/bash
@@ -46,12 +60,13 @@ rebuild:  ## Rebuild without cache
 	$(COMPOSE) build --no-cache
 
 # ─── Tests ──────────────────────────────────────────────────────────
+# The suite always targets a throwaway *test* database (see
+# tests/conftest.py). Override it with TEST_DATABASE_URL.
 test:  ## Run full test suite
 	$(COMPOSE_TEST) run --rm app-test
 
 test-unit:  ## Run unit tests only
-	docker run --rm -v $(PWD):/code -w /code --env-file .env.test \
-	  python:3.12-slim sh -c "pip install -e .[dev] && pytest tests/unit -v"
+	$(COMPOSE_TEST) run --rm app-test pytest tests/unit -v
 
 test-integration:  ## Run integration tests only
 	$(COMPOSE_TEST) run --rm app-test pytest tests/integration -v
@@ -60,20 +75,23 @@ cov:  ## Run tests with coverage report
 	$(COMPOSE_TEST) run --rm app-test pytest --cov=app --cov-report=term-missing --cov-report=html
 
 cov-html: cov  ## Open the HTML coverage report
-	@powershell -NoProfile -Command "Start-Process 'htmlcov\index.html'"
+	@echo "Coverage report: htmlcov/index.html"
+	@if command -v xdg-open >/dev/null 2>&1; then xdg-open htmlcov/index.html; \
+	elif command -v open >/dev/null 2>&1; then open htmlcov/index.html; \
+	else start htmlcov/index.html 2>/dev/null || echo "(open htmlcov/index.html manually)"; fi
 
 cov-clear:  ## Remove coverage artifacts
 	rm -rf .coverage htmlcov .pytest_cache
 
 # ─── Quality ────────────────────────────────────────────────────────
 lint:  ## Run ruff
-	docker run --rm -v $(PWD):/code -w /code python:3.12-slim sh -c "pip install ruff==0.8.4 && ruff check ."
+	ruff check .
 
 format:  ## Auto-format code
-	docker run --rm -v $(PWD):/code -w /code python:3.12-slim sh -c "pip install ruff==0.8.4 && ruff format ."
+	ruff format .
 
 typecheck:  ## Run mypy
-	docker run --rm -v $(PWD):/code -w /code python:3.12-slim sh -c "pip install -e .[dev] && mypy app"
+	mypy app
 
 # ─── Migrations ─────────────────────────────────────────────────────
 migrate:  ## Apply all pending migrations
@@ -90,20 +108,22 @@ seed:  ## Load dev seed data
 	$(COMPOSE) run --rm $(APP_SERVICE) python -m scripts.seed
 
 # ─── Local DB helpers (run uvicorn outside Docker) ─────────────────
-db-init:  ## Load schema.sql into the local Postgres
-	@echo "[db-init] applying schema.sql to $$DATABASE_URL"
-	@if [ -z "$$DATABASE_URL" ]; then \
-	  echo "DATABASE_URL not set — using default from app/core/config.py"; \
-	fi
-	@powershell -NoProfile -Command "$$env:PGPASSWORD = 'David*2020*'; $$env:PATH = 'C:\Program Files\PostgreSQL\17\bin;' + $$env:PATH; psql -U postgres -h localhost -d autopay -f schema.sql"
-	@echo "[db-init] done"
+# These talk to the PostgreSQL instance on PGHOST. Put the password in
+# the PGPASSWORD environment variable (or ~/.pgpass) — it is never
+# stored in this file.
+db-create:  ## Create the local database
+	psql -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d postgres -c 'CREATE DATABASE $(PGDATABASE);'
 
-db-reset:  ## Drop + recreate the local autopay database (DESTROYS DATA)
-	@powershell -NoProfile -Command "$$env:PGPASSWORD = 'David*2020*'; $$env:PATH = 'C:\Program Files\PostgreSQL\17\bin;' + $$env:PATH; psql -U postgres -h localhost -d postgres -c 'DROP DATABASE IF EXISTS autopay;' -c 'CREATE DATABASE autopay;' && psql -U postgres -h localhost -d autopay -f schema.sql"
-	@echo "[db-reset] done"
+db-init:  ## Load schema.sql into the local database and mark it migrated
+	psql -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE) -f schema.sql
+	alembic upgrade head
 
-db-shell:  ## Open psql against the local autopay database
-	@powershell -NoProfile -Command "$$env:PGPASSWORD = 'David*2020*'; $$env:PATH = 'C:\Program Files\PostgreSQL\17\bin;' + $$env:PATH; psql -U postgres -h localhost -d autopay"
+db-reset:  ## Drop + recreate the local database (DESTROYS DATA)
+	psql -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d postgres -c 'DROP DATABASE IF EXISTS $(PGDATABASE);' -c 'CREATE DATABASE $(PGDATABASE);'
+	$(MAKE) db-init
+
+db-shell:  ## Open psql against the local database
+	psql -h $(PGHOST) -p $(PGPORT) -U $(PGUSER) -d $(PGDATABASE)
 
 # ─── Cleanup ────────────────────────────────────────────────────────
 clean:  ## Remove containers + images
@@ -114,21 +134,28 @@ nuke:  ## Remove containers, images, AND volumes (DESTROYS DB DATA)
 
 # ─── Helpers ────────────────────────────────────────────────────────
 keygen:  ## Generate Fernet + JWT secrets and print them (so you can paste into .env)
-	@echo "FERNET_KEY (paste into .env):"
-	@powershell -NoProfile -Command "& '.\.venv\Scripts\python.exe' -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())'"
+	@echo "BVN_ENCRYPTION_KEY (paste into .env):"
+	@$(PYTHON) -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 	@echo ""
 	@echo "JWT_SECRET_KEY (paste into .env):"
-	@powershell -NoProfile -Command "& '.\.venv\Scripts\python.exe' -c 'import secrets; print(secrets.token_urlsafe(64))'"
+	@$(PYTHON) -c "import secrets; print(secrets.token_urlsafe(64))"
+	@echo ""
+	@echo "TELEGRAM_SECRET_TOKEN (paste into .env):"
+	@$(PYTHON) -c "import secrets; print(secrets.token_hex(16))"
 
 ngrok:  ## Expose the local app on a public ngrok URL (for webhook testing)
-	@if (Get-Command ngrok -ErrorAction SilentlyContinue) { \
+	@if command -v ngrok >/dev/null 2>&1; then \
 		echo "[ngrok] starting tunnel to http://localhost:8000"; \
-		ngrok http 8000 --domain $$NGROK_DOMAIN; \
-	} else { \
-		echo "ngrok not found. Install: winget install ngrok"; \
-	}
+		ngrok http 8000; \
+	else \
+		echo "ngrok not found. Install it from https://ngrok.com/download"; \
+	fi
 
-webhooks:  ## Print the webhook URL you need to paste into Paystack dashboard
+webhooks:  ## Print the webhook URLs you need to configure
 	@echo "Paystack webhook URL (paste into https://dashboard.paystack.com/#/settings/developer):"
 	@echo "  http://localhost:8000/webhooks/paystack  (dev)"
-	@echo "  https://<your-railway-app>.up.railway.app/webhooks/paystack  (prod)"
+	@echo "  https://<your-app-host>/webhooks/paystack  (prod)"
+	@echo ""
+	@echo "Telegram webhook URL (set as WEBHOOK_URL in .env):"
+	@echo "  http://localhost:8000/telegram/webhook  (dev)"
+	@echo "  https://<your-app-host>/telegram/webhook  (prod)"

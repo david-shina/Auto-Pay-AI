@@ -23,8 +23,9 @@ just a one-off `send_message`).
 from __future__ import annotations
 
 import logging
+import secrets
 from decimal import Decimal
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -50,6 +51,10 @@ from app.handlers.helpers import escape_md
 from app.handlers.schedule_conversation import build_schedule_conversation
 from app.handlers.topup_conversation import build_topup_conversation
 from app.models.enums import TransactionType
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from app.models.transaction import Transaction
+    from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +123,14 @@ async def start_bot() -> Optional[Application]:
         # Webhook mode: Telegram pushes updates to settings.webhook_url.
         # We don't `run_until_complete` here; updates are received via
         # the /telegram/webhook FastAPI route.
-        await _application.bot.set_webhook(url=settings.webhook_url)
+        #
+        # `secret_token` makes Telegram echo a shared secret back on
+        # every request. We verify it in the route below, so only
+        # Telegram can drive the bot.
+        await _application.bot.set_webhook(
+            url=settings.webhook_url,
+            secret_token=settings.telegram_secret_token or None,
+        )
         logger.info("Telegram bot running in webhook mode → %s", settings.webhook_url)
     else:
         # Polling mode: long-poll Telegram for updates. This runs
@@ -159,6 +171,25 @@ webhook_router = APIRouter(tags=["telegram"])
     summary="Receive Telegram updates (webhook mode only)",
 )
 async def telegram_webhook(request: Request) -> dict:
+    # Authenticate the caller. Telegram echoes the secret token we
+    # registered with `set_webhook` in the
+    # `X-Telegram-Bot-Api-Secret-Token` header. Without this check
+    # anyone who guesses the URL could drive the bot as a user.
+    expected = settings.telegram_secret_token
+    if expected:
+        provided = request.headers.get("x-telegram-bot-api-secret-token", "")
+        if not provided or not secrets.compare_digest(provided, expected):
+            logger.warning("Telegram webhook rejected: bad secret token")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid secret token.",
+            )
+    else:
+        logger.warning(
+            "TELEGRAM_SECRET_TOKEN is not set — /telegram/webhook accepts "
+            "unauthenticated requests. Set it in production."
+        )
+
     if _application is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -168,9 +199,13 @@ async def telegram_webhook(request: Request) -> dict:
         payload = await request.json()
         update = Update.de_json(payload, _application.bot)
     except Exception as exc:  # noqa: BLE001
+        # Don't leak python-telegram-bot library internals (e.g.
+        # "AttributeError: 'NoneType' object has no attribute 'chat'")
+        # to the caller. Log for ops, return a clean 400.
+        logger.warning("Telegram webhook bad payload: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Bad update payload: {exc}",
+            detail="Bad update payload.",
         ) from exc
 
     await _application.process_update(update)

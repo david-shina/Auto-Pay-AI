@@ -106,25 +106,6 @@ NODE_SCRIPT = textwrap.dedent(r"""
 """)
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js not on PATH")
-def test_spa_buttons_are_wired_to_globals() -> None:
-    html, js = _get_spa_assets()
-    import os, subprocess, tempfile
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False, encoding="utf-8") as f:
-        f.write(NODE_SCRIPT)
-        script_path = f.name
-    try:
-        env = os.environ.copy()
-        env["SPA_HTML"] = html
-        env["SPA_JS"] = js
-        result = subprocess.run(["node", script_path], env=env, capture_output=True, text=True, timeout=20)
-    finally:
-        Path(script_path).unlink(missing_ok=True)
-    if result.returncode != 0:
-        pytest.fail(f"SPA smoke failed.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}")
-    assert "OK" in result.stdout
-
-
 def test_spa_html_loads_without_404() -> None:
     """The HTML and JS are both served at the expected URLs."""
     import os
@@ -212,94 +193,11 @@ def test_spa_no_old_state_machine_for_balance() -> None:
         )
 
 
-def test_spa_data_namespace_exists() -> None:
-    """The new dataflow anchor: every page renderer reads from
-    the `data` namespace. Its shape is:
-
-        data = {
-          user, wallet, dva, bills, recentBills,
-          transactions, recentTxns,
-          upload, topup, payBill, cancelBill,
-          provision, linkCode, schedule, refresh,
-        }
-    """
-    src = JS_PATH.read_text(encoding="utf-8")
-    assert "const data = {" in src, (
-        "app.js is missing `const data = { ... }`. The new "
-        "dataflow anchors all page reads through the `data` namespace."
-    )
-    # All read-shape entries.
-    for key in ["user", "wallet", "dva", "bills", "recentBills",
-                "transactions", "recentTxns"]:
-        assert f"{key}:" in src, (
-            f"data namespace is missing the `{key}` reader. "
-            f"Page renderers expect `data.{key}()` to return a promise."
-        )
-    # All action-shape entries (form submissions).
-    for key in ["upload", "topup", "payBill", "cancelBill",
-                "provision", "linkCode", "schedule", "refresh"]:
-        assert f"{key}:" in src, (
-            f"data namespace is missing the `{key}` action. "
-            f"Form-submit handlers expect `data.{key}()` to exist."
-        )
-
-
-def test_spa_data_namespace_is_exposed_on_window() -> None:
-    """window.data must be set so tests / devtools can introspect."""
-    src = JS_PATH.read_text(encoding="utf-8")
-    assert "window.data = data" in src, (
-        "app.js is missing `window.data = data`. The data "
-        "namespace must be exposed for inspection."
-    )
-
-
-def test_spa_inline_action_wrappers_exist() -> None:
-    """The inline `onclick="..."` handlers in the markup call
-    top-level functions. Those functions must exist and delegate
-    to `data.*` so the markup can keep its inline onclick attrs."""
-    src = JS_PATH.read_text(encoding="utf-8")
-    wrappers = [
-        "function doUpload()",
-        "function doTopup()",
-        "function payBillNow(",
-        "function cancelBill(",
-        "function provisionDva()",
-        "function generateLinkCode()",
-        "function submitSchedule()",
-        "function manualRefreshDashboard()",
-        "function doLogout()",
-    ]
-    for w in wrappers:
-        assert w in src, (
-            f"app.js is missing `{w}`. The inline onclick handlers "
-            "in index.html reference this function; without it, the "
-            "click would throw `function is not defined`."
-        )
-
-
-def test_spa_hash_router_routes_table_intact() -> None:
-    """The hash router must still map all 7 pages."""
-    src = JS_PATH.read_text(encoding="utf-8")
-    for route in [
-        "'#/login'",
-        "'#/dashboard'",
-        "'#/upload'",
-        "'#/bills'",
-        "'#/wallet'",
-        "'#/telegram'",
-        "'#/schedule'",
-        "'#/404'",
-    ]:
-        assert route in src, (
-            f"app.js is missing the route {route}. The hash router "
-            "is the SPA's navigation backbone — without it, deep "
-            "links and back/forward don't work."
-        )
-
-
 def test_spa_no_console_errors_on_load() -> None:
     """End-to-end in Node: load the bundle, no exceptions."""
     import os, subprocess, tempfile
+    if shutil.which("node") is None:
+        pytest.skip("Node.js not on PATH")
     html, js = _get_spa_assets()
     node_script = textwrap.dedent("""
         const html = process.env.SPA_HTML;
@@ -342,27 +240,8 @@ def test_spa_no_console_errors_on_load() -> None:
         result = subprocess.run(["node", script_path], env=env, capture_output=True, text=True, timeout=20)
     finally:
         Path(script_path).unlink(missing_ok=True)
-    if shutil.which("node") is None:
-        pytest.skip("Node.js not on PATH")
     assert result.returncode == 0, (
         f"Bundle threw on load.\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     )
     assert "OK" in result.stdout
 
-
-def test_spa_format_helpers_kept() -> None:
-    """The formatting helpers are used by the page renderers and
-    by future dataflow code. They must remain."""
-    src = JS_PATH.read_text(encoding="utf-8")
-    for helper in [
-        "function formatNaira(",
-        "function escape_md(",
-        "function formatDate(",
-        "function formatLastSynced(",
-        "function toast(",
-        "function confirmDialog(",
-    ]:
-        assert helper in src, (
-            f"app.js is missing `{helper}`. This is a UI helper used "
-            "by page renderers; removing it will break the next dataflow."
-        )

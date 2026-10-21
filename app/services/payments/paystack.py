@@ -12,7 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -34,6 +34,9 @@ from app.services.payments.exceptions import (
     ProviderError,
     WebhookSignatureError,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from app.services.payments.base import TransactionStatusResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,17 +82,24 @@ def _map_paystack_error(status_code: int, body: dict) -> PaymentError:
 class PaystackProvider(PaymentProvider):
     name = "paystack"
 
-    def __init__(self, *, secret_key: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        *,
+        secret_key: str,
+        timeout: float = 30.0,
+        base_url: str | None = None,
+    ) -> None:
         self._secret_key = secret_key
         self._timeout = timeout
+        self._base_url = (base_url or PAYSTACK_BASE).rstrip("/")
         # We open the client lazily so tests that never call a method
         # don't pay the connection-pool cost.
-        self._client: Optional[httpx.AsyncClient] = None
+        self._client: httpx.AsyncClient | None = None
 
     async def _client_lazy(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(
-                base_url=PAYSTACK_BASE,
+                base_url=self._base_url,
                 timeout=self._timeout,
                 headers={
                     "Authorization": f"Bearer {self._secret_key}",
@@ -108,14 +118,19 @@ class PaystackProvider(PaymentProvider):
         method: str,
         path: str,
         *,
-        json_body: Optional[dict] = None,
-        params: Optional[dict] = None,
+        json_body: dict | None = None,
+        params: dict | None = None,
     ) -> dict:
         """Make a Paystack call and return the `data` payload.
 
         Raises a typed `PaymentError` subclass on any non-2xx response.
         Raises `ProviderError` on transport failures.
         """
+        if not self._secret_key:
+            raise AuthenticationError(
+                "PAYSTACK_SECRET_KEY is not configured; cannot call Paystack.",
+                provider="paystack",
+            )
         client = await self._client_lazy()
         try:
             resp = await client.request(method, path, json=json_body, params=params)
@@ -145,7 +160,7 @@ class PaystackProvider(PaymentProvider):
         email: str,
         first_name: str,
         last_name: str,
-        phone: Optional[str] = None,
+        phone: str | None = None,
     ) -> str:
         data = await self._request(
             "POST",
@@ -163,7 +178,7 @@ class PaystackProvider(PaymentProvider):
         self,
         *,
         customer_code: str,
-        preferred_bank: Optional[str] = None,
+        preferred_bank: str | None = None,
     ) -> VirtualAccountData:
         payload: dict[str, Any] = {"customer": customer_code}
         if preferred_bank:
@@ -254,7 +269,7 @@ class PaystackProvider(PaymentProvider):
         amount_kobo: int,
         email: str,
         reference: str,
-        callback_url: Optional[str] = None,
+        callback_url: str | None = None,
     ) -> TopupInit:
         """Start a hosted Checkout session. The user is redirected to
         `authorization_url`, pays via card / bank / USSD / QR, and on
@@ -288,6 +303,58 @@ class PaystackProvider(PaymentProvider):
             reference=reference,
             provider=self.name,
             access_code=str(access_code) if access_code else None,
+        )
+
+    # ── Transaction lookup (polling fallback) ──────────────────────
+
+    async def get_transaction(
+        self,
+        *,
+        reference: str,
+    ) -> "TransactionStatusResult":
+        """Look up a single transaction by our reference.
+
+        Paystack exposes `GET /transaction/verify/{reference}` which
+        returns `{status, reference, amount, ...}`. We normalize
+        `status` to the closed set
+        `{"success", "pending", "failed", "reversed", "unknown"}`.
+
+        Paystack's status values include `success`, `abandoned`,
+        `failed`, `reversed`. We map `abandoned` → `failed` (the
+        user never completed payment, no retry from us).
+        """
+        from app.services.payments.base import TransactionStatusResult
+
+        data = await self._request(
+            "GET",
+            f"/transaction/verify/{reference}",
+        )
+
+        _PAYSTACK_STATUS_MAP = {
+            "success": "success",
+            "pending": "pending",
+            "failed": "failed",
+            "abandoned": "failed",
+            "reversed": "reversed",
+        }
+        raw_status = str(data.get("status") or "").lower()
+        normalized = _PAYSTACK_STATUS_MAP.get(raw_status, "unknown")
+
+        amount_kobo: int | None = None
+        raw_amount = data.get("amount")
+        if raw_amount is not None:
+            try:
+                amount_kobo = int(raw_amount)
+            except (TypeError, ValueError):
+                amount_kobo = None
+
+        provider_ref = str(data.get("reference") or reference)
+
+        return TransactionStatusResult(
+            provider_reference=provider_ref,
+            status=normalized,
+            amount_kobo=amount_kobo,
+            raw=data,
         )
 
     # ── Webhook signature + parsing ─────────────────────────────────
@@ -333,12 +400,9 @@ class PaystackProvider(PaymentProvider):
         # Normalize event names. The Provider's webhook event string
         # is what business code switches on.
         provider_ref = ""
-        amount_kobo: Optional[int] = None
+        amount_kobo: int | None = None
 
-        if event_name == "charge.success":
-            provider_ref = str(data.get("reference") or "")
-            amount_kobo = int(data.get("amount") or 0)
-        elif event_name in ("transfer.success", "transfer.failed", "transfer.reversed"):
+        if event_name == "charge.success" or event_name in ("transfer.success", "transfer.failed", "transfer.reversed"):
             provider_ref = str(data.get("reference") or "")
             amount_kobo = int(data.get("amount") or 0)
         elif event_name == "dedicatedaccount.assign.success":
@@ -373,11 +437,14 @@ class PaystackProvider(PaymentProvider):
 # ── Factory dependency for FastAPI ──────────────────────────────────
 
 def get_payment_provider() -> PaymentProvider:
-    """Build the configured provider. Swapped in tests via `app.dependency_overrides`."""
+    """Build the configured Paystack provider.
+
+    Swapped in tests via `app.dependency_overrides`. Paystack is now
+    the only supported payment gateway in this project; the previous
+    Nomba branch has moved to the standalone `nomba-gateway` project.
+    """
     settings = get_settings()
-    if settings.payment_provider == "paystack":
-        return PaystackProvider(secret_key=settings.paystack_secret_key)
-    raise RuntimeError(
-        f"Unknown payment provider: {settings.payment_provider!r}. "
-        "Add a new branch here."
+    return PaystackProvider(
+        secret_key=settings.paystack_secret_key,
+        base_url=settings.paystack_base_url,
     )

@@ -7,7 +7,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-David*2020*}
+      # No default: a shared default password is a shared default
+      # password. Set POSTGRES_PASSWORD in .env (see .env.example).
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - set it in .env}
       POSTGRES_DB: ${POSTGRES_DB:-autopay}
     volumes:
       - pg_data:/var/lib/postgresql/data
@@ -30,7 +32,12 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-David*2020*}@localhost:5432/${POSTGRES_DB:-autopay}
+      # The database service is reachable as `db` on the compose
+      # network — `localhost` would point back at this container.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-autopay}
+      # The image defaults to production (which requires every secret
+      # to be set); override it for local development.
+      ENVIRONMENT: ${ENVIRONMENT:-development}
     depends_on:
       db:
         condition: service_healthy

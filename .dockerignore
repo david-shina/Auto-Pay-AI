@@ -39,6 +39,10 @@ Makefile
 LICENSE
 docs
 *.md
+# ...but the build needs them: `pyproject.toml` declares
+# `readme = "README.md"`, and setuptools fails without it.
+!README.md
+!LICENSE
 
 # ─── Docker compose local overrides ─────────────────────────────────
 docker-compose.override.yml

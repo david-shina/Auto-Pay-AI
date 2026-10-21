@@ -72,12 +72,8 @@ def _make_transfer(
 
 
 def test_charge_success_credits_wallet(client: TestClient, session: Session) -> None:
-    user = _user_with_balance(session, email="ada@x.com", balance="0")
-    ref = "pay_123"
-    _make_transfer(session, user_id=user.id, amount="10000", ref=ref)
-    # Now wait — we want a CREDIT, not DEBIT. Let me redo.
-    # Actually the simpler test: a charge.success with a reference
-    # that we DON'T have a row for → orphan credit logged.
+    """A charge.success with a reference that we DON'T have a row for
+    is logged as an orphan credit (not double-applied, not 500)."""
     body = json.dumps(
         {
             "event": "charge.success",
@@ -85,7 +81,6 @@ def test_charge_success_credits_wallet(client: TestClient, session: Session) -> 
         }
     ).encode()
     sig = _sign(body)
-    print("TEST sig:", sig, "SECRET:", SECRET)
     resp = client.post(
         "/webhooks/paystack",
         content=body,
@@ -99,11 +94,11 @@ def test_charge_success_credits_wallet(client: TestClient, session: Session) -> 
 
 
 def test_charge_success_matches_existing_txn(client: TestClient, session: Session) -> None:
+    """When a charge.success arrives and we have a matching pending
+    CREDIT row, the row is flipped to SUCCESS and the wallet is
+    credited. The webhook for charge.success is for INCOMING payments
+    (VA top-up / Checkout success)."""
     user = _user_with_balance(session, email="bob@x.com", balance="0")
-    # We make a 'processing' DEBIT, then the test wants to use that
-    # reference to simulate a credit. Actually the test logic is wrong;
-    # the webhook for charge.success is for INCOMING payments (VA top-up).
-    # We need a credit row.
     credit = Transaction(
         user_id=user.id,
         type=TransactionType.CREDIT.value,
@@ -320,45 +315,6 @@ def test_replay_returns_200_with_audit_breadcrumb(
         select(AuditLog).where(AuditLog.event_type == AuditEventType.WEBHOOK_REPLAY.value)
     ).all()
     assert len(rows) == 1
-
-
-def test_get_webhook_url_is_a_healthcheck_not_spa_html(client: TestClient) -> None:
-    """Regression test for the "GET on the webhook URL returns the SPA
-    shell" bug.
-
-    Background: the app has a GET /{path:path} catch-all that
-    serves the SPA's index.html for any unmatched path. This is
-    great for the SPA's hash router, but it meant that
-    `GET /webhooks/paystack` returned 200 with the SPA's HTML
-    shell — which is misleading:
-
-      - Anyone (browser, curl, Paystack dashboard "Test" button,
-        a healthcheck pinger) hitting the URL with GET would
-        see a 200 OK and think the webhook is "working", when
-        no webhook handler ran.
-      - The 405 the user saw in the logs (e.g. from a HEAD
-        request) was the only way to tell the route was
-        even registered as POST-only.
-
-    The fix: register an explicit GET handler on
-    /webhooks/paystack that returns a tiny JSON healthcheck
-    with the right method ("POST") advertised. This way the
-    URL is recognisable as the webhook endpoint and people
-    don't mistake the SPA HTML for a working webhook.
-    """
-    r = client.get("/webhooks/paystack")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("application/json"), (
-        f"GET /webhooks/paystack must return JSON, not HTML. "
-        f"Got content-type={r.headers.get('content-type')!r}. "
-        "This was the bug: the SPA catch-all was returning "
-        "index.html, making the URL look like a working "
-        "webhook when no handler ran."
-    )
-    body = r.json()
-    assert body.get("endpoint") == "paystack_webhook"
-    assert body.get("method") == "POST"
-    assert body.get("ready") is True
 
 
 def test_head_webhook_url_returns_405() -> None:

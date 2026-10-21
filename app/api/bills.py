@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Optional
 
 from fastapi import (
     APIRouter,
@@ -24,6 +23,7 @@ from app.agents.graphs import run_agent
 from app.agents.state import Decision
 from app.core.config import settings
 from app.core.database import get_session
+from app.core.metrics import record_bill_created
 from app.models.bill import Bill
 from app.models.enums import BillStatus
 from app.models.user import User
@@ -35,11 +35,10 @@ from app.schemas.bill import (
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
 from app.services.date_parser import parse_bill_due_date
-from app.core.metrics import record_bill_created, record_bill_paid, record_payout
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
 from app.services.payout import execute_payout
-
+from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bills"])
@@ -53,11 +52,11 @@ router = APIRouter(tags=["bills"])
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_bill(
-    request_bill: Optional[str] = Form(
+    request_bill: str | None = Form(
         default=None,
         description="Raw bill text (alternative to uploading a file)",
     ),
-    file: Optional[UploadFile] = File(default=None),
+    file: UploadFile | None = File(default=None),
     session: Session = Depends(get_session),
     user: User = Depends(get_current_active_user),
     provider: PaymentProvider = Depends(get_payment_provider),
@@ -87,10 +86,11 @@ async def upload_bill(
 
     try:
         extracted = await loader.extract()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
+        logger.exception("Bill extraction failed for user %d: %s", user.id, exc)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Failed to extract bill: {exc}",
+            detail="Could not read the bill. Try a clearer photo or paste the text.",
         ) from exc
 
     if not extracted.vendor_name or float(extracted.amount) <= 0:
@@ -121,7 +121,7 @@ async def upload_bill(
         user_id=user.id,
         bill_id=bill.id,
         amount=float(bill.amount),
-        provider="paystack",  # we only ship with Paystack for now
+        provider=provider,
     )
 
     # 3. Run the decision agent
@@ -140,6 +140,9 @@ async def upload_bill(
             result = await execute_payout(session, bill_id=bill.id, provider=provider)
             session.commit()
             message = result.message
+            from app.core.metrics import record_bill_paid, record_payout
+            record_bill_paid(trigger="manual")
+            record_payout(result="success")
         except HTTPException:
             session.rollback()
             # Payout refused (insufficient funds, etc). Bill is still
@@ -152,6 +155,7 @@ async def upload_bill(
 
     session.commit()
     session.refresh(bill)
+    record_bill_created(trigger="upload")
 
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
@@ -172,6 +176,7 @@ async def create_bill(
     payload: BillCreateRequest,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_active_user),
+    provider: PaymentProvider = Depends(get_payment_provider),
 ) -> BillActionResponse:
     bill = Bill(
         user_id=user.id,
@@ -191,10 +196,11 @@ async def create_bill(
         user_id=user.id,
         bill_id=bill.id,
         amount=float(bill.amount),
-        provider="paystack",
+        provider=provider.name,
     )
     session.commit()
     session.refresh(bill)
+    record_bill_created(trigger="manual")
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
         message="Bill created.",
@@ -205,7 +211,7 @@ async def create_bill(
 
 @router.get("", response_model=list[BillResponse])
 def list_bills(
-    status_filter: Optional[str] = None,
+    status_filter: str | None = None,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_active_user),
 ) -> list[BillResponse]:
@@ -247,11 +253,15 @@ async def pay_bill(
     try:
         result = await execute_payout(session, bill_id=bill.id, provider=provider)
         session.commit()
+        from app.core.metrics import record_bill_paid, record_payout
+        record_bill_paid(trigger="manual")
+        record_payout(result="success")
     except HTTPException:
         session.rollback()
         raise
-    except Exception:
+    except Exception as exc:
         session.rollback()
+        logger.exception("Manual bill payout failed for bill %d: %s", bill_id, exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Payment provider error. Please try again later.",

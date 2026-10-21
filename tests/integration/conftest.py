@@ -1,47 +1,35 @@
 """Integration test fixtures.
 
-These tests hit a real database (`autopay_test`). We use a separate
-DB from the dev one so the test can truncate every table between
-tests without nuking seeded data.
+These tests hit a real database. The database is always a dedicated
+*test* database: the root `tests/conftest.py` resolves it (and refuses
+to run against a database whose name does not contain "test") before
+any app import, so the engine is bound to it from the start.
 
 DB setup is one-time:
-  PGPASSWORD='...' psql -U postgres -h localhost -d postgres \\
-    -c "CREATE DATABASE autopay_test;"
-  PGPASSWORD='...' psql -U postgres -h localhost -d autopay_test \\
-    -f schema.sql
+  psql -U postgres -h localhost -d postgres -c "CREATE DATABASE autopay_test;"
+  psql -U postgres -h localhost -d autopay_test -f schema.sql
 """
 from __future__ import annotations
 
 import os
-from typing import Any, Callable
 
 import pytest
-from cryptography.fernet import Fernet
 
-# ── Test env vars BEFORE any `from app...` import ───────────────────
-TEST_DB_URL = "postgresql://postgres:David*2020*@localhost:5432/autopay_test"
-os.environ["ENVIRONMENT"] = "test"
-os.environ["LOG_LEVEL"] = "WARNING"
-os.environ["DATABASE_URL"] = TEST_DB_URL
-os.environ["JWT_SECRET_KEY"] = "test-jwt-secret-must-be-at-least-32-chars-long"
-os.environ["BVN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-os.environ["PAYSTACK_SECRET_KEY"] = "sk_test_dummy"
-# Force the regex fallback in the loaders (no real LLM calls). Some
-# tests assert that the endpoint returns 422 when the LLM can't pull
-# a vendor from the input. The hardcoded `groq_api_key` default in
-# `app.core.config` is a real working key, so without this override
-# those tests would silently switch to LLM-extracted values.
-os.environ["GROQ_API_KEY"] = ""
+from tests.conftest import TEST_DATABASE_URL
+
+# The root conftest already set DATABASE_URL before any app import, so
+# the engine below is bound to the test database. We re-assert it here
+# so a mis-ordered import can never point the suite at real data.
+os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 
 # Now import the app
-from app.core import config as _config  # noqa: E402
-from app.core import database as _database  # noqa: E402
 import app.core.config as _config_mod  # noqa: E402
 import app.services.crypto as _crypto  # noqa: E402
+from app.core import config as _config  # noqa: E402
+from app.core import database as _database  # noqa: E402
 
 _config.get_settings.cache_clear()
 _crypto._fernet.cache_clear()
-_database.engine.dispose()  # discard any old engine bound to the dev DB
 
 # IMPORTANT: also refresh the module-level `settings` shortcut. If
 # `app.core.config` was imported earlier (e.g. by tests/conftest.py),
@@ -71,8 +59,24 @@ TABLES = [
 ]
 
 
+def _assert_test_database(conn) -> None:
+    """Guard: only ever truncate a throwaway test database.
+
+    This checks the *connected* database rather than the URL, so a
+    mis-parsed DSN or a stray `DATABASE_URL` cannot slip through.
+    """
+    db_name = conn.execute(text("SELECT current_database()")).scalar_one()
+    if "test" not in str(db_name).lower():
+        raise RuntimeError(
+            f"Refusing to truncate non-test database {db_name!r}. The test "
+            "fixtures wipe every table; point TEST_DATABASE_URL at a "
+            "database whose name contains 'test'."
+        )
+
+
 def _truncate_all() -> None:
     with engine.connect() as conn:
+        _assert_test_database(conn)
         conn.execute(
             text(
                 "TRUNCATE TABLE "
@@ -83,27 +87,108 @@ def _truncate_all() -> None:
         conn.commit()
 
 
-@pytest.fixture(autouse=True)
-def _clean_db():
-    """Truncate every table before and after each integration test.
+@pytest.fixture
+def clean_db():
+    """Truncate every table before and after the test.
 
-    Autouse so every integration test gets a clean DB without having
-    to list this fixture in its signature. (The leading underscore is
-    a historical artifact.)
+    A normal (not autouse) fixture so it can be requested explicitly by
+    the `session` / `client` fixtures, which the unit tests import too.
     """
     _truncate_all()
     yield
     _truncate_all()
 
 
+@pytest.fixture(autouse=True)
+def _autouse_clean_db(clean_db):
+    """Every integration test starts from a clean database.
+
+    Autouse in this directory only. The unit tests import `clean_db`
+    explicitly, so the tests that touch the database still get a clean
+    slate - but the unit tests that never touch it do not pay for a
+    truncate they do not need.
+    """
+    yield
+
+
+
+def _install_paystack_stub(monkeypatch=None):
+    """Install the Paystack-shaped stub as the payment provider.
+
+    Idempotent: clears any existing DI overrides first, then binds
+    the fresh stub. Used by both the autouse `_default_stub_provider`
+    fixture and the explicit `stub_provider` fixture so a test can
+    request either (or both) and the same stub instance is installed.
+    """
+    from app.api import auth as auth_module
+    from app.api import bills as bills_module
+    from app.api import wallet as wallet_module
+    from app.api import webhooks as webhooks_module
+    from app.services import payments as _payments_module
+    from app.services.payments import paystack as _paystack_module
+
+    _StubPaystack._counter = 0
+    stub = _StubPaystack()
+    stub.calls = []
+
+    # Clear any previous overrides (idempotent / re-bindable).
+    for module in (auth_module, bills_module, wallet_module, webhooks_module):
+        app.dependency_overrides.pop(module.get_payment_provider, None)
+
+    # FastAPI DI: every Depends(get_payment_provider) returns the stub.
+    app.dependency_overrides[auth_module.get_payment_provider] = lambda: stub
+    app.dependency_overrides[bills_module.get_payment_provider] = lambda: stub
+    app.dependency_overrides[wallet_module.get_payment_provider] = lambda: stub
+    app.dependency_overrides[webhooks_module.get_payment_provider] = lambda: stub
+
+    # Function-level patch: scheduler + any non-DI caller.
+    if not hasattr(_StubPaystack, "_real_factory"):
+        _StubPaystack._real_factory = _paystack_module.get_payment_provider
+    if monkeypatch is not None:
+        monkeypatch.setattr(
+            _payments_module, "get_payment_provider", lambda: stub
+        )
+    else:
+        _payments_module.get_payment_provider = lambda: stub
+
+    return stub
+
+
+@pytest.fixture(autouse=True)
+def _default_stub_provider():
+    """Autouse fixture: every integration test gets the Paystack stub
+    as the payment provider by default.
+    """
+    _install_paystack_stub()
+    yield
+    # The autouse is non-destructive on teardown so `stub_provider`
+    # (which uses monkeypatch to override the module-level factory)
+    # has its restoration managed by pytest.
+
+
 @pytest.fixture
-def client() -> TestClient:
+def stub_provider(monkeypatch):
+    """A fresh Paystack-shaped stub for tests that need to inspect
+    `stub.calls` directly.
+
+    The autouse `_default_stub_provider` fixture has already
+    installed the DI overrides; this fixture additionally patches
+    the module-level factory and re-binds DI in case the test was
+    run from a unit-test scope (where the autouse is not active).
+    """
+    stub = _install_paystack_stub(monkeypatch=monkeypatch)
+    yield stub
+    # monkeypatch handles restoring `_payments_module.get_payment_provider`
+
+
+@pytest.fixture
+def client(clean_db) -> TestClient:
     """A TestClient with the test DB wired in."""
     return TestClient(app)
 
 
 @pytest.fixture
-def session() -> Session:
+def session(clean_db) -> Session:
     """Direct DB session for tests that need to set up data without HTTP."""
     s = Session(engine)
     try:
@@ -148,6 +233,23 @@ class _StubPaystack:
             account_number=kwargs["account_number"],
             account_name="DSTV NG LTD",
             bank_code=kwargs["bank_code"],
+        )
+
+    async def get_transaction(self, **kwargs):
+        """Stub for transaction-status lookup. Records the call and
+        returns a canned `TransactionStatusResult` with status='success'.
+        Used by the manual-verify endpoint and the scheduler poll job.
+        Tests that need a 'pending' or 'failed' status can override
+        `stub_provider.get_transaction` on a per-test basis.
+        """
+        from app.services.payments.base import TransactionStatusResult
+
+        self.calls.append(("get_transaction", kwargs))
+        return TransactionStatusResult(
+            provider_reference=kwargs["reference"],
+            status="success",
+            amount_kobo=None,
+            raw={"status": "success", "stub": True},
         )
 
     async def create_transfer_recipient(self, **kwargs):
@@ -216,10 +318,7 @@ class _StubPaystack:
         data = payload.get("data") or {}
         provider_ref = ""
         amount_kobo = None
-        if event_name == "charge.success":
-            provider_ref = str(data.get("reference") or "")
-            amount_kobo = int(data.get("amount") or 0)
-        elif event_name in ("transfer.success", "transfer.failed", "transfer.reversed"):
+        if event_name == "charge.success" or event_name in ("transfer.success", "transfer.failed", "transfer.reversed"):
             provider_ref = str(data.get("reference") or "")
             amount_kobo = int(data.get("amount") or 0)
         else:
@@ -238,42 +337,3 @@ class _StubPaystack:
             amount_kobo=amount_kobo,
             raw=payload,
         )
-
-
-@pytest.fixture
-def stub_provider(monkeypatch):
-    """A fresh stub for each test. Overrides `get_payment_provider`.
-
-    Patches TWO surfaces:
-      1. FastAPI dependency injection (for endpoints that use
-         `Depends(get_payment_provider)`).
-      2. The function in the `app.services.payments` package module
-         (for the scheduler, which calls `get_payment_provider()`
-         directly without going through DI). All downstream imports
-         (auth, bills, wallet, scheduler) bind the same function
-         object at import time, so replacing it on the source
-         module propagates to every caller.
-    """
-    from app.api import auth as auth_module
-    from app.api import bills as bills_module
-    from app.api import wallet as wallet_module
-    from app.services import payments as _payments_module
-
-    _StubPaystack._counter = 0
-    stub = _StubPaystack()
-    stub.calls = []
-
-    # 1. FastAPI DI overrides
-    app.dependency_overrides[auth_module.get_payment_provider] = lambda: stub
-    app.dependency_overrides[bills_module.get_payment_provider] = lambda: stub
-    app.dependency_overrides[wallet_module.get_payment_provider] = lambda: stub
-
-    # 2. Function-level patch (so the scheduler uses the stub)
-    monkeypatch.setattr(
-        _payments_module, "get_payment_provider", lambda: stub
-    )
-
-    yield stub
-
-    app.dependency_overrides.clear()
-

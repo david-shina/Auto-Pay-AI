@@ -15,6 +15,7 @@ Refresh tokens are JWTs *and* have their hash stored. Why both?
 from __future__ import annotations
 
 import hashlib
+import logging
 import secrets
 from datetime import datetime, timezone
 from typing import Optional
@@ -38,6 +39,8 @@ from app.models.enums import AuditActor
 from app.models.refresh_token import RefreshToken
 from app.models.user import User
 from app.services.audit import audit_login, audit_logout, audit_user_signup
+
+logger = logging.getLogger(__name__)
 
 
 # ── FastAPI security scheme ──────────────────────────────────────────
@@ -167,9 +170,13 @@ def rotate_tokens(
     try:
         payload = decode_token(refresh_token, expected_type="refresh")
     except JWTError_ as exc:
+        # Don't leak PyJWT internals (e.g. "Signature has expired",
+        # "Not enough segments") to the user. Log for ops, return a
+        # clean message.
+        logger.warning("Refresh token rejected: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid refresh token: {exc}",
+            detail="Invalid or expired refresh token.",
         ) from exc
 
     user_id = int(payload["sub"])
@@ -278,9 +285,13 @@ def get_current_user(
     try:
         payload = decode_token(token, expected_type="access")
     except JWTError_ as exc:
+        # Don't leak PyJWT internals (e.g. "Signature has expired",
+        # "Not enough segments") to the user. Log for ops, return a
+        # clean message.
+        logger.warning("Access token rejected: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=str(exc),
+            detail="Invalid or expired access token.",
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
     user_id = int(payload["sub"])

@@ -12,8 +12,8 @@ services:
       - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U autopay_test -d autopay_test"]
-      interval: 3s
-      timeout: 3s
+      interval: 5s
+      timeout: 5s
       retries: 10
     networks:
       - autopay-test-net
@@ -22,19 +22,29 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # The test image needs pytest & friends.
+        EXTRAS: dev
     container_name: autopay-app-test
-    env_file: .env.test
+    env_file: .env
     environment:
       DATABASE_URL: postgresql://autopay_test:autopay_test@db-test:5432/autopay_test
+      TEST_DATABASE_URL: postgresql://autopay_test:autopay_test@db-test:5432/autopay_test
       ENVIRONMENT: test
       LOG_LEVEL: WARNING
+      SCHEDULER_ENABLED: "false"
     depends_on:
       db-test:
         condition: service_healthy
+    # The entrypoint applies the migrations before handing over, so the
+    # command only has to run the suite.
     command: ["pytest", "--cov=app", "--cov-report=term-missing"]
     volumes:
       - ./app:/code/app
       - ./tests:/code/tests
+      - ./migrations:/code/migrations
+      - ./alembic.ini:/code/alembic.ini
+      - ./schema.sql:/code/schema.sql
     networks:
       - autopay-test-net
 

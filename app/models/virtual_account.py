@@ -32,6 +32,13 @@ class VirtualAccount(SQLModel, table=True):
     provider_account_reference: str = Field(
         sa_column=Column(String(128), nullable=False, unique=True, index=True),
     )
+    # The gateway's customer code for this account holder. Incoming bank
+    # transfers to the account are reported with this code, so we store
+    # it to credit the right wallet.
+    provider_customer_code: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(128), nullable=True, index=True),
+    )
     account_number: Optional[str] = Field(
         default=None,
         sa_column=Column(String(32), unique=True, index=True, nullable=True),

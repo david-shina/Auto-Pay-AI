@@ -7,13 +7,11 @@ everything in one of these.
 """
 from __future__ import annotations
 
-from typing import Optional
-
 
 class PaymentError(Exception):
     """Base class for all payment-gateway failures."""
 
-    def __init__(self, message: str, *, provider: str, raw: Optional[dict] = None) -> None:
+    def __init__(self, message: str, *, provider: str, raw: dict | None = None) -> None:
         super().__init__(message)
         self.provider = provider
         self.raw = raw or {}

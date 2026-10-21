@@ -18,6 +18,10 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # `schema.sql` already creates this table, so a database built from
+    # the schema file is already up to date. Skip instead of failing.
+    if sa.inspect(op.get_bind()).has_table("webhook_events"):
+        return
     op.create_table(
         "webhook_events",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -42,5 +46,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not sa.inspect(op.get_bind()).has_table("webhook_events"):
+        return
     op.drop_index("idx_webhook_events_received_at", table_name="webhook_events")
     op.drop_table("webhook_events")

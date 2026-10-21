@@ -132,7 +132,13 @@ const API = (() => {
     },
 
     wallet: {
+      // `topup` and `verifyTopup` were removed when the Nomba-only
+      // topup flow was extracted to the standalone nomba-gateway
+      // sibling project. The Paystack-only project funds the wallet
+      // by bank transfer to the user's virtual account (auto-credited
+      // by the charge.success webhook).
       topup: (amount, callback_url) => request("POST", "/wallet/topup", { amount, callback_url }),
+      verifyTopup: (reference) => request("POST", "/wallet/topup/verify", { reference }),
       transactions: (limit, type) => request("GET", `/wallet/transactions?limit=${limit || 20}${type ? `&type=${type}` : ""}`),
     },
   };
@@ -633,6 +639,14 @@ async function loadWallet() {
 
     document.getElementById("wallet-balance").textContent = fmtMoney(wallet.balance);
     renderTransactions(txns);
+    // If there's a pending top-up in sessionStorage (the user came
+    // back from the Paystack Checkout page), re-render the
+    // "I've paid" card so they can verify the credit.
+    const pendingRef = sessionStorage.getItem("pending_topup_ref");
+    const pendingAmount = sessionStorage.getItem("pending_topup_amount");
+    if (pendingRef && pendingAmount) {
+      renderPendingTopupCard(pendingRef, pendingAmount);
+    }
   } catch (err) {
     toast(err.message, "error");
   }
@@ -665,32 +679,122 @@ async function loadTransactions(type) {
   }
 }
 
+// ── Top-up handlers (Paystack Checkout) ─────────────────────────────
+
 async function handleTopup() {
   const input = document.getElementById("topup-amount");
   const btn = document.getElementById("topup-btn");
-  const amount = parseFloat(input.value);
-
+  const amount = Number(input.value);
   if (!amount || amount < 100) {
-    toast("Minimum top-up is \u20A6100.", "error");
+    toast("Minimum top-up is ₦100.", "error");
     return;
   }
-
   btn.disabled = true;
-  btn.textContent = "Opening\u2026";
-
+  btn.textContent = "Opening Paystack…";
   try {
     const res = await API.wallet.topup(amount);
-    toast("Redirecting to Paystack\u2026", "info");
-    window.open(res.authorization_url, "_blank");
+    // Remember the pending top-up so when the user lands back on the
+    // wallet page (after Paystack redirects) we can offer a
+    // "I've paid" button as a manual-verify fallback.
+    sessionStorage.setItem("pending_topup_ref", res.reference);
+    sessionStorage.setItem("pending_topup_amount", String(res.amount));
+    renderPendingTopupCard(res.reference, res.amount);
+    window.open(res.authorization_url, "_blank", "noopener");
   } catch (err) {
-    toast(err.message, "error");
+    toast(err.message || "Top-up failed", "error");
   } finally {
     btn.disabled = false;
     btn.textContent = "Top up";
   }
 }
 
-// ── Page: Telegram ────────────────────────────────────────────────────────
+function renderPendingTopupCard(reference, amount) {
+  const existing = document.getElementById("pending-topup-card");
+  if (existing) existing.remove();
+  const card = document.createElement("div");
+  card.id = "pending-topup-card";
+  card.className = "card p-4 mb-4 border-l-4 border-lime-400";
+  card.innerHTML = `
+    <div class="flex justify-between items-start gap-4">
+      <div>
+        <p class="font-syne font-bold text-lime-300">Pending top-up</p>
+        <p class="text-sm text-slate-300 mt-1">
+          ₦${Number(amount).toLocaleString()} \u00b7 ref <code>${esc(reference)}</code>
+        </p>
+        <p class="text-xs text-slate-400 mt-2">
+          Paid on Paystack? Tap <strong>I've paid</strong> to
+          credit your wallet.
+        </p>
+      </div>
+      <div class="flex flex-col gap-2">
+        <button id="pending-topup-verify" class="btn-lime text-sm py-2 px-3">
+          \u2705 I've paid
+        </button>
+        <button id="pending-topup-dismiss" class="btn-secondary text-sm py-1 px-3">
+          Dismiss
+        </button>
+      </div>
+    </div>
+  `;
+  const anchor = document.getElementById("wallet-balance")?.closest(".card");
+  if (anchor && anchor.parentNode) {
+    anchor.parentNode.insertBefore(card, anchor.nextSibling);
+  } else {
+    document.body.appendChild(card);
+  }
+  document.getElementById("pending-topup-verify").onclick = () => verifyTopup(reference);
+  document.getElementById("pending-topup-dismiss").onclick = () => {
+    sessionStorage.removeItem("pending_topup_ref");
+    sessionStorage.removeItem("pending_topup_amount");
+    card.remove();
+  };
+}
+
+async function verifyTopup(reference) {
+  const btn = document.getElementById("pending-topup-verify");
+  btn.disabled = true;
+  btn.textContent = "Verifying…";
+  try {
+    const res = await API.wallet.verifyTopup(reference);
+    if (res.credited) {
+      toast(res.message, "success");
+      sessionStorage.removeItem("pending_topup_ref");
+      sessionStorage.removeItem("pending_topup_amount");
+      const card = document.getElementById("pending-topup-card");
+      if (card) card.remove();
+      loadWallet();
+      return;
+    }
+    if (res.status === "already_credited") {
+      toast(res.message, "success");
+      sessionStorage.removeItem("pending_topup_ref");
+      sessionStorage.removeItem("pending_topup_amount");
+      const card = document.getElementById("pending-topup-card");
+      if (card) card.remove();
+      loadWallet();
+      return;
+    }
+    if (res.status === "provider_pending") {
+      toast("Still pending on Paystack. Try again in a few seconds.", "info");
+      return;
+    }
+    if (res.status === "already_failed" || res.status === "amount_mismatch" || res.status === "provider_failed" || res.status === "provider_reversed") {
+      toast(res.message, "error");
+      sessionStorage.removeItem("pending_topup_ref");
+      sessionStorage.removeItem("pending_topup_amount");
+      const card = document.getElementById("pending-topup-card");
+      if (card) card.remove();
+      return;
+    }
+    toast(res.message || "Could not verify yet.", "info");
+  } catch (err) {
+    toast(err.message || "Verify failed", "error");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "\u2705 I've paid";
+  }
+}
+
 function renderTelegram() {
   return `
     <div class="page-content fade-up max-w-xl">

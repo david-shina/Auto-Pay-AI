@@ -8,6 +8,8 @@ The root path `/` is owned by the SPA in `app.main:serve_index` —
 this router deliberately does not register a `/` route so the
 SPA can take over without conflict.
 """
+import logging
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -15,6 +17,8 @@ from sqlalchemy import text
 from sqlmodel import Session
 
 from app.core.database import get_session
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["health"])
 
@@ -33,9 +37,13 @@ def readyz(session: Session = Depends(get_session)) -> JSONResponse:
             content={"status": "ready", "database": "ok"},
         )
     except Exception as exc:  # noqa: BLE001
+        # Log the full DB driver error for operators, but only return
+        # a generic "unreachable" to the caller (probes shouldn't
+        # leak DB internals).
+        logger.exception("Readiness probe DB check failed: %s", exc)
         return JSONResponse(
             status_code=503,
-            content={"status": "not ready", "database": str(exc)},
+            content={"status": "not ready", "database": "unreachable"},
         )
 
 

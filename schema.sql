@@ -14,7 +14,17 @@
 -- portability becomes important.
 
 -- ── Reusable extension(s) ───────────────────────────────────────────
-CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+-- Nothing in this schema depends on pgcrypto (it is there for the
+-- app's future use), so a role without permission to create the
+-- extension must not break the migration. We log a notice and carry on.
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+EXCEPTION
+    WHEN insufficient_privilege THEN
+        RAISE NOTICE 'pgcrypto extension not created (insufficient privilege)';
+END
+$$;
 
 -- =====================================================================
 -- users
@@ -66,6 +76,7 @@ CREATE TABLE IF NOT EXISTS virtual_accounts (
                                             REFERENCES users(id) ON DELETE CASCADE,
     provider                    TEXT         NOT NULL DEFAULT 'paystack',
     provider_account_reference  TEXT         NOT NULL UNIQUE,
+    provider_customer_code      TEXT,
     account_number              TEXT         UNIQUE,
     account_name                TEXT,
     bank_name                   TEXT,
@@ -75,6 +86,18 @@ CREATE TABLE IF NOT EXISTS virtual_accounts (
 
 CREATE INDEX IF NOT EXISTS idx_virtual_accounts_account_number
     ON virtual_accounts(account_number);
+
+-- Converge databases created before this column existed. `CREATE TABLE
+-- IF NOT EXISTS` above is a no-op for them, so the column would
+-- otherwise be missing and the index below would fail.
+ALTER TABLE virtual_accounts
+    ADD COLUMN IF NOT EXISTS provider_customer_code TEXT;
+
+-- The provider's customer code identifies the account holder at the
+-- gateway. Incoming bank transfers to the account are reported with
+-- this code, so we store it to credit the right wallet.
+CREATE INDEX IF NOT EXISTS idx_virtual_accounts_provider_customer_code
+    ON virtual_accounts(provider_customer_code);
 
 -- =====================================================================
 -- bills
@@ -126,6 +149,7 @@ CREATE TABLE IF NOT EXISTS transactions (
                                            'failed','reversed')),
     provider            TEXT            NOT NULL DEFAULT 'paystack',
     provider_reference  TEXT            UNIQUE,
+    provider_order_reference  TEXT,
     retry_count         INTEGER         NOT NULL DEFAULT 0,
     failure_reason      TEXT,
     narration           TEXT,
@@ -143,6 +167,13 @@ CREATE INDEX IF NOT EXISTS idx_transactions_created_at
     ON transactions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_provider_reference
     ON transactions(provider_reference);
+
+-- Converge databases created before this column existed.
+ALTER TABLE transactions
+    ADD COLUMN IF NOT EXISTS provider_order_reference TEXT;
+
+CREATE INDEX IF NOT EXISTS ix_transactions_provider_order_reference
+    ON transactions(provider_order_reference);
 
 -- =====================================================================
 -- audit_logs  — every state-changing event appends a row

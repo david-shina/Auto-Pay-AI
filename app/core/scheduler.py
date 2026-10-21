@@ -77,7 +77,6 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=None,  # don't fire immediately on boot
     )
     _scheduler.add_job(
         _run_sync_in_private_loop("process_recurring_bills", _process_recurring_bills),
@@ -87,7 +86,6 @@ def start_scheduler() -> None:
         replace_existing=True,
         max_instances=1,
         coalesce=True,
-        next_run_time=None,
     )
     try:
         _scheduler.start()
@@ -125,6 +123,15 @@ def _run_sync_in_private_loop(job_id: str, fn):
     so we don't have to special-case the two schedulers.
     """
     def wrapper() -> None:
+        # The scheduler is always started so that its lifecycle is
+        # observable, but the job body is a no-op when the scheduler is
+        # disabled (the test suite uses this so a background job can
+        # never pay a bill while another test asserts on balances).
+        from app.core.config import settings
+
+        if not settings.scheduler_enabled:
+            logger.info("Scheduler job %s skipped (scheduler_enabled=false)", job_id)
+            return
         try:
             asyncio.run(fn())
         except Exception:  # noqa: BLE001

@@ -1,267 +1,357 @@
 # AutoPay AI
 
-> AI-powered bill automation for Nigerian users. Send a bill photo, PDF, or text to a Telegram bot (or upload via web dashboard) and the platform pays it on your behalf via Paystack — with a LangGraph decision agent deciding **pay-now** / **schedule** / **hold**.
+AutoPay AI is a FastAPI backend that automates bill payments for Nigerian users. Send a bill to the Telegram bot or the REST API as text, a photo, or a PDF. The app extracts the vendor, amount, and due date, decides whether to **pay now**, **schedule**, or **hold**, and pays by Paystack bank transfer from a wallet the user funds through Paystack Checkout or a dedicated virtual account.
+
+## Features
+
+- Bill intake through the Telegram bot (text, photo, or PDF) or the REST API (JSON or file upload)
+- Bill extraction with a Groq LLM when `GROQ_API_KEY` is set, a local RapidOCR fallback for images, and a regex fallback
+- Pay now / schedule / hold decision in a LangGraph graph. The rules are deterministic and do not call an LLM: hold if the balance is below the amount plus fee, pay now if the bill is due within 3 days, otherwise schedule
+- Paystack bank-transfer payouts. The recipient's account name is checked against the vendor name (fuzzy match), and the wallet is refunded when a payout fails
+- Wallet top-ups through Paystack Checkout, credited by the `charge.success` webhook
+- Dedicated virtual accounts (Paystack DVA). Bank transfers into them are credited to the right wallet
+- JWT access tokens with rotating refresh tokens, and bcrypt password hashing
+- BVN encrypted at rest with Fernet, plus an HMAC for lookups
+- Paystack webhook signature verification (HMAC-SHA512) with replay protection
+- Telegram webhook secret-token verification, so only Telegram can drive the bot
+- Audit log, Prometheus metrics, and a small web dashboard at `/`
+- Scheduled auto-pay: a background job pays bills that become due
+
+## How it works
+
+1. **Intake.** Send a bill to the bot, or call `POST /api/v1/bills/upload`. The bot shows the extracted details so you can confirm or edit them.
+2. **Decision.** The decision node picks pay now, schedule, or hold from your balance, the payout fee, and the days until the due date. On the REST upload endpoint, pay-now bills are paid immediately. Scheduled bills are picked up later by the scheduler job, which runs every minute.
+3. **Payout.** `execute_payout` locks the bill and wallet rows, debits the amount plus fee, resolves the account name with Paystack, checks it against the vendor name, creates a transfer recipient, and starts the transfer. Paystack's `transfer.success`, `transfer.failed`, and `transfer.reversed` webhooks set the final status.
+4. **Funding.** `POST /api/v1/wallet/topup` returns a Paystack Checkout URL, and the wallet is credited when Paystack sends `charge.success`. A bank transfer into the user's dedicated virtual account is credited the same way, matched by the gateway's customer code.
 
 ## Architecture
 
-```
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│   Telegram Bot   │    │   Web / REST API │    │  Paystack Webhook│
-│  (in-process)    │    │     (FastAPI)    │    │  (charge.success │
-└────────┬─────────┘    └─────────┬────────┘    │  transfer.*)     │
-         │                        │               └────────┬─────────┘
-         │                        │                        │
-         └────────────────┬───────┴───────────┬────────────┘
-                          ▼                   ▼
-                  ┌───────────────────────────────────┐
-                  │            FastAPI app           │
-                  │  /api/v1/auth /bills /kyc        │
-                  │  /api/v1/wallet /telegram        │
-                  │  /webhooks/paystack              │
-                  │  /telegram/webhook               │
-                  └────────────────┬──────────────────┘
-                                   │
-       ┌───────────────┬───────────┼─────────────┐
-       ▼               ▼           ▼             ▼
-  ┌─────────┐   ┌─────────────┐ ┌──────────┐ ┌────────┐
-  │Postgres │   │  Paystack   │ │ LangGraph│ │ APSched│
-  │ 8 tables│   │ DVA / trans │ │  agent   │ │  jobs  │
-  │         │   │  / webhooks │ │          │ │        │
-  └─────────┘   └─────────────┘ └──────────┘ └────────┘
-```
+- **`app/main.py`**: FastAPI app. Mounts the REST routers, the Paystack and Telegram webhook endpoints, the health and metrics endpoints, and the dashboard. Its lifespan starts the scheduler and the Telegram bot.
+- **`app/services/`**: business logic for bills, payouts, wallet, auth, KYC, audit, bill extraction, and name matching.
+- **`app/services/payments/`**: payment-provider interface and the Paystack implementation.
+- **`app/agents/`**: LangGraph decision graph with one deterministic node.
+- **`app/services/telegram.py`, `app/handlers/`**: python-telegram-bot conversations. The bot runs in the same process, in polling or webhook mode.
+- **`app/core/scheduler.py`**: APScheduler jobs for scheduled and recurring bills.
+- **PostgreSQL**: SQLModel tables, defined by `schema.sql` and versioned with Alembic.
 
-## Quickstart
+Main libraries: Python 3.12, FastAPI, SQLModel/SQLAlchemy, PostgreSQL, Alembic, python-telegram-bot, APScheduler, LangGraph, Groq, RapidOCR (ONNX Runtime), PyMuPDF, and the Prometheus client.
+
+## Getting started
+
+### Prerequisites
+
+- Python 3.12 (`pyproject.toml` allows 3.12 to 3.14; CI and Docker use 3.12)
+- PostgreSQL 16 (what CI and Docker use). The schema creates the `pgcrypto` extension, so the role needs permission to do that (a superuser is fine for local development)
+- A Paystack account with test API keys
+- Optional: a Telegram bot token from @BotFather, a Groq API key, Node.js (for the SPA smoke test), Docker, and GNU make
+
+### 1. Install
+
+Run these from the repository root. The first install is large because of the OCR and ONNX dependencies.
 
 ```bash
-# 1. Generate secrets
-make keygen
-# 2. Copy .env.example to .env and paste the secrets
-cp .env.example .env
-# 3. Bring up the app + Postgres
-make up
-# 4. Open the API docs
-open http://localhost:8000/docs
+python -m venv .venv
+source .venv/bin/activate            # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"
 ```
 
-## Environment variables
-
-| Var | Default | Required? | Notes |
-|---|---|---|---|
-| `ENVIRONMENT` | `development` | yes | `development` / `staging` / `production` / `test` |
-| `LOG_LEVEL` | `INFO` | no | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `SECRET_KEY` | `change-me` | prod | Used by itsdangerous (session cookies). |
-| `DATABASE_URL` | `postgresql://postgres:...` | yes | SQLAlchemy URL. |
-| `PAYSTACK_SECRET_KEY` | — | yes | Live or test (`sk_test_...`) key. |
-| `PAYSTACK_PUBLIC_KEY` | — | yes | Public-facing key. |
-| `BVN_ENCRYPTION_KEY` | — | yes | Fernet key. `make keygen` prints one. |
-| `JWT_SECRET_KEY` | — | yes | ≥32 chars. `make keygen` prints one. |
-| `JWT_ALGORITHM` | `HS256` | no | |
-| `JWT_ACCESS_TTL_MIN` | `15` | no | Access-token lifetime. |
-| `JWT_REFRESH_TTL_DAYS` | `7` | no | Refresh-token lifetime. |
-| `PAYOUT_FEE_NGN` | `50.00` | no | Flat fee per payout, in NGN. |
-| `TELEGRAM_BOT_TOKEN` | (empty) | optional | From `@BotFather`. Empty = bot disabled. |
-| `TELEGRAM_BOT_USERNAME` | (empty) | optional | Bot username WITHOUT `@`. Used in deep-link URLs. |
-| `WEBHOOK_URL` | (empty) | optional | Production: Telegram pushes here. Empty = polling. |
-| `GROQ_API_KEY` | (empty) | optional | If unset, bill loader falls back to regex. |
-| `LANGCHAIN_API_KEY` | (empty) | optional | Tracing only. |
-| `AUTO_PROVISION_DVA_ON_SIGNUP` | `false` | no | If true, signup calls Paystack to create a DVA inline. Keep false until your Paystack business is approved for Dedicated NUBANs. |
-
-Generate a `.env`:
+### 2. Configure
 
 ```bash
-cp .env.example .env
-# then fill in or:
-make keygen   # prints FERNET_KEY + JWT_SECRET_KEY
+cp .env.example .env                 # Windows: copy .env.example .env
 ```
 
-## API reference
+Generate the secrets and paste them into `.env`:
 
-All routes are versioned under `/api/v1/` unless noted.
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"                              # JWT_SECRET_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # BVN_ENCRYPTION_KEY
+python -c "import secrets; print(secrets.token_hex(16))"                                   # TELEGRAM_SECRET_TOKEN
+```
 
-### Auth (no auth required)
+At a minimum, set `DATABASE_URL`, `JWT_SECRET_KEY`, `BVN_ENCRYPTION_KEY`, and `PAYSTACK_SECRET_KEY` (a test key). `.env` is gitignored; never commit it.
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/api/v1/auth/signup` | `SignupRequest` | `201 TokenResponse` |
-| POST | `/api/v1/auth/login` | `LoginRequest` | `200 TokenResponse` |
-| POST | `/api/v1/auth/refresh` | `RefreshRequest` | `200 TokenResponse` |
-| POST | `/api/v1/auth/telegram/link-code` | — | `200 TelegramLinkCodeResponse` |
-| DELETE | `/api/v1/auth/telegram/link-code` | — | `204` |
-| DELETE | `/api/v1/auth/telegram/link` | — | `204` (unlink Telegram) |
+Leave `WEBHOOK_URL` empty for local development so the Telegram bot uses polling. A non-empty value switches the bot to webhook mode. Leave `TELEGRAM_BOT_TOKEN` empty to run without the bot. See [Configuration](#configuration) for every variable.
 
-### Auth (Bearer required)
+`make keygen` prints the three secrets above if you have GNU make installed.
 
-| Method | Path | Returns |
+### 3. Create the database
+
+```bash
+psql -U postgres -h localhost -c "CREATE DATABASE autopay;"
+alembic upgrade head
+```
+
+`alembic upgrade head` applies `schema.sql` (the baseline migration) and then the later migrations. It is safe to run on an empty database and on one that was created by loading `schema.sql` by hand.
+
+The Docker Postgres container loads `schema.sql` on first boot; the app container then runs `alembic upgrade head`, which is a no-op for the objects that already exist.
+
+### 4. Run
+
+```bash
+uvicorn app.main:app --reload --port 8000
+```
+
+- Dashboard: http://localhost:8000/
+- API docs (Swagger UI): http://localhost:8000/docs
+- Liveness: http://localhost:8000/healthz. Readiness (checks the database): http://localhost:8000/readyz
+
+Settings are read from `.env` in the current directory, so start the app from the repository root.
+
+Optional demo data:
+
+```bash
+python -m scripts.seed
+```
+
+This creates two demo users, `ada@example.com` and `tunde@example.com` (passwords are in `scripts/seed.py`), plus a demo bill and a demo top-up. It does nothing if any user already exists. Do not run it against a production database.
+
+### Local webhooks (optional)
+
+Paystack webhooks, and Telegram in webhook mode, need a public HTTPS URL to reach your machine. With [ngrok](https://ngrok.com/):
+
+```bash
+ngrok http 8000
+```
+
+Point Paystack's webhook URL at `https://<ngrok-host>/webhooks/paystack`. For Telegram webhook mode, set `WEBHOOK_URL=https://<ngrok-host>/telegram/webhook` and `TELEGRAM_SECRET_TOKEN` to any random string. Free ngrok URLs change on restart.
+
+## Configuration
+
+Settings come from environment variables or `.env`. Environment variables take precedence over `.env`.
+
+| Variable | Default | Notes |
 |---|---|---|
-| POST | `/api/v1/auth/logout` | `204` |
-| GET | `/api/v1/auth/me` | `200 UserPublic` |
-| GET | `/api/v1/auth/wallet` | `200 {balance, currency}` |
+| `ENVIRONMENT` | `development` | `development`, `staging`, `production`, or `test`. In `production` the app refuses to start when a required secret is missing. |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
+| `DATABASE_URL` | local `autopay` database | **Set this explicitly.** Format: `postgresql://user:password@host:5432/dbname` |
+| `DATABASE_POOL_SIZE`, `DATABASE_MAX_OVERFLOW`, `DATABASE_ECHO` | `10`, `20`, `false` | Connection pool size, overflow, and SQL logging |
+| `JWT_SECRET_KEY` | empty | **Required.** Signs access and refresh tokens. Changing it signs out all users. Use a long random string. Outside production a missing value produces an ephemeral key that changes on restart. |
+| `JWT_ALGORITHM` | `HS256` | |
+| `JWT_ACCESS_TTL_MIN` | `15` | Access-token lifetime in minutes |
+| `JWT_REFRESH_TTL_DAYS` | `7` | Refresh-token lifetime in days |
+| `BCRYPT_ROUNDS` | `12` | Password-hashing work factor. Values below 12 are rejected outside the `test` environment. |
+| `BVN_ENCRYPTION_KEY` | empty | **Required for KYC.** A Fernet key. It also derives the key for BVN hashes, so changing it breaks lookups for stored BVNs. |
+| `PAYSTACK_SECRET_KEY` | empty | **Required.** `sk_test_...` or `sk_live_...`. Used for API calls and webhook signature checks. |
+| `PAYSTACK_BASE_URL` | `https://api.paystack.co` | Paystack API root. |
+| `AUTO_PROVISION_DVA_ON_SIGNUP` | `false` | If `true`, signup creates a dedicated virtual account. Enable it only after Paystack approves Dedicated NUBAN for your business. |
+| `PAYOUT_FEE_NGN` | `50.00` | Flat fee per payout, in NGN |
+| `TELEGRAM_BOT_TOKEN` | empty | Empty disables the bot. Use your own token from @BotFather. |
+| `TELEGRAM_BOT_USERNAME` | empty | Bot username without `@`. Used for `https://t.me/<username>?start=...` links. |
+| `TELEGRAM_SECRET_TOKEN` | empty | Secret Telegram echoes on every webhook request. **Required in production when webhook mode is on.** Requests without it get a 403. |
+| `WEBHOOK_URL` | empty | Empty means long polling (local development). Set `https://<host>/telegram/webhook` for webhook mode. |
+| `ALLOWED_ORIGINS` | localhost on ports 3000, 5173, and 8000 | Comma-separated CORS origins |
+| `GROQ_API_KEY` | empty | Enables LLM extraction. Empty means OCR and regex only. |
+| `SCHEDULER_ENABLED` | `true` | Set to `false` to keep the auto-pay jobs from running. The test suite sets it to `false`. |
+| `APP_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`, `POSTGRES_PORT` | | Used by `docker-compose.yml`. `POSTGRES_PASSWORD` has no default: Compose refuses to start without it. |
+| `TEST_DATABASE_URL` | `postgresql://postgres:postgres@localhost:5432/autopay_test` | The throwaway database the test suite uses. Its name must contain "test". |
+| `PAYSTACK_PUBLIC_KEY`, `LANGCHAIN_API_KEY`, `LANGCHAIN_TRACING_V2`, `GOOGLE_API_KEY` | | Present in `.env.example` but not used by the application. |
 
-### Bills (Bearer required)
+## API
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/api/v1/bills` | `BillCreateRequest` (JSON) | `201 BillActionResponse` |
-| POST | `/api/v1/bills/upload` | `request_bill` (text) OR `file` (PDF/PNG/JPG) | `201 BillActionResponse` |
-| GET | `/api/v1/bills?status=pending` | — | `200 BillResponse[]` |
-| GET | `/api/v1/bills/{id}` | — | `200 BillResponse` |
-| POST | `/api/v1/bills/{id}/pay` | — | `200 BillActionResponse` |
-| POST | `/api/v1/bills/{id}/cancel` | — | `200 BillActionResponse` |
+Every endpoint except signup, login, refresh, the dashboard and API docs, the health and metrics endpoints, and the webhooks requires `Authorization: Bearer <access_token>`.
 
-### KYC (Bearer required)
+```bash
+# Sign up. The response contains access_token and refresh_token.
+curl -X POST http://localhost:8000/api/v1/auth/signup \
+  -H "Content-Type: application/json" \
+  -d '{"first_name":"Ada","last_name":"Lovelace","email":"you@example.com","phone_number":"+2348012345678","password":"secret123"}'
 
-| Method | Path | Body | Returns |
-|---|---|---|---|
-| POST | `/api/v1/kyc/bvn` | `{bvn: 11-digit-string}` | `201 KycStatusResponse` |
-| GET | `/api/v1/kyc/bvn` | — | `200 KycStatusResponse` |
+# Create a bill from JSON
+curl -X POST http://localhost:8000/api/v1/bills \
+  -H "Authorization: Bearer <access_token>" \
+  -H "Content-Type: application/json" \
+  -d '{"vendor_name":"Lekki Phase 1 Estate","amount":25000,"due_date":"2026-11-30T00:00:00","account_number":"0123456789","bank_code":"058","bank_name":"GTBank"}'
+```
 
-### Wallet (Bearer required)
+Interactive documentation with request and response schemas is at `/docs`.
 
-| Method | Path | Returns |
+### Health and operations
+
+| Method | Path | Description |
 |---|---|---|
-| POST | `/api/v1/wallet/provision` | `201 {virtual_account, already_existed}` |
+| GET | `/` | Web dashboard |
+| GET | `/docs` | Interactive API docs (Swagger UI) |
+| GET | `/healthz` | Liveness probe |
+| GET | `/readyz` | Readiness probe (checks the database) |
+| GET | `/metrics` | Prometheus metrics. Not authenticated, so restrict access at the network level |
 
-### Webhooks (no auth; signature-verified)
+### Auth (`/api/v1/auth`)
 
-| Method | Path | Purpose |
+| Method | Path | Description |
 |---|---|---|
-| POST | `/webhooks/paystack` | Paystack events (`charge.success`, `transfer.success/failed/reversed`, `dedicatedaccount.assign.success`). HMAC-SHA512 verified. Replay-safe. |
-| POST | `/telegram/webhook` | Telegram bot updates. Only used in webhook mode. |
+| POST | `/signup` | Create an account and return tokens (201) |
+| POST | `/login` | Log in and return tokens |
+| POST | `/refresh` | Exchange a refresh token for new tokens. The old refresh token is rotated |
+| POST | `/logout` | Revoke a refresh token, or all of your refresh tokens if none is given |
+| GET | `/me` | Current user |
+| GET | `/wallet` | Wallet balance and currency |
+| POST | `/telegram/link-code` | Create a 15-minute code for `/link` in the bot |
+| DELETE | `/telegram/link-code` | Invalidate unused link codes |
+| DELETE | `/telegram/link` | Unlink Telegram from your account |
 
-### Health (no auth)
+### Bills (`/api/v1/bills`)
 
-| Method | Path | Returns |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/healthz` | `200 {status: alive}` |
-| GET | `/readyz` | `200 {status: ready, database: ok}` |
-| GET | `/` | App banner |
+| POST | `/api/v1/bills` | Create a bill from JSON (201) |
+| POST | `/api/v1/bills/upload` | Create a bill from a `request_bill` text field or a `file` (PDF or image). The decision runs, and pay-now bills are paid immediately (201) |
+| GET | `/api/v1/bills` | List your bills |
+| GET | `/api/v1/bills/{bill_id}` | Get one bill |
+| POST | `/api/v1/bills/{bill_id}/pay` | Pay a bill now (runs the payout) |
+| POST | `/api/v1/bills/{bill_id}/cancel` | Cancel a bill |
 
-## Telegram bot commands
+### KYC (`/api/v1/kyc`)
 
-| Command | What it does |
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/kyc/bvn` | Submit an 11-digit BVN. It is stored encrypted |
+| GET | `/api/v1/kyc/bvn` | KYC status: last four digits and validation flag |
+
+### Wallet (`/api/v1/wallet`)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/v1/wallet/provision` | Create a Paystack dedicated virtual account for the user |
+| POST | `/api/v1/wallet/topup` | Start a Paystack Checkout top-up and return the checkout URL (201) |
+| POST | `/api/v1/wallet/topup/verify` | Check a pending top-up with Paystack |
+| GET | `/api/v1/wallet/transactions` | Transaction history |
+
+### Webhooks
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/webhooks/paystack` | Paystack events: `charge.success`, `transfer.success`, `transfer.failed`, `transfer.reversed`, and `dedicatedaccount.assign.success`. HMAC-SHA512 signature-checked and deduplicated |
+| POST | `/telegram/webhook` | Telegram updates. Requires the `X-Telegram-Bot-Api-Secret-Token` header to match `TELEGRAM_SECRET_TOKEN` |
+
+## Telegram bot
+
+Create a link code with `POST /api/v1/auth/telegram/link-code`, then send `/link <code>` to the bot.
+
+| Command | Description |
 |---|---|
-| `/start` | Welcome message with /link instructions |
-| `/link ABC123` | Link your account using the 6-char code from the web dashboard |
-| `/unlink` | Disconnect your Telegram from the web account |
-| `/wallet` | Show balance + virtual account details |
-| `/bills` | List recent bills |
-| `/help` | Help message |
-| `/cancel` | Cancel the current conversation |
+| `/start` | Welcome message |
+| `/link <code>` | Link your Telegram account |
+| `/unlink` | Unlink your Telegram account |
+| `/wallet` | Show your wallet balance |
+| `/bills` | List your bills |
+| `/transactions` | Show your transactions |
+| `/topup` | Start a top-up through Paystack Checkout |
+| `/schedule` | Schedule a bill payment step by step |
+| `/help` | Show help |
+| `/cancel` | Cancel the current flow |
 
-Send a bill (photo, PDF, or text) at any time to start the upload flow.
+Sending any text, photo, or document starts the bill flow.
 
-## Architecture decision: deferred DVA
+## Security
 
-Signup does **not** call Paystack to provision a Dedicated NUBAN by default. The Paystack Dedicated NUBAN feature requires business approval; turning it on prematurely causes every signup to fail-audit the DVA step.
+- Passwords are hashed with bcrypt (cost 12).
+- Access tokens are short-lived JWTs; refresh tokens are stored hashed in the database and rotated on every use.
+- BVNs are encrypted with Fernet. Lookups use a separate HMAC, so the database never holds a searchable plaintext BVN.
+- Paystack webhooks are verified with HMAC-SHA512 before the body is parsed, and deduplicated on `(provider, event_id)`.
+- Telegram webhook requests are checked against `TELEGRAM_SECRET_TOKEN`.
+- Every state change writes an audit row.
+- The app ships no credentials. In `production` it refuses to start if `JWT_SECRET_KEY`, `BVN_ENCRYPTION_KEY`, or `PAYSTACK_SECRET_KEY` is missing.
 
-Two ways to provision a DVA:
+> **Rotate anything that was previously committed.** Earlier versions of this repository carried real-looking values in `app/core/config.py` (Paystack secret key, Telegram bot token, Groq and LangChain keys, JWT signing key, BVN encryption key, and the database password) and the same database password in `.env.example`, `docker-compose.yml`, the `Makefile`, and the test fixtures. Those values were removed from the source, but they should be treated as exposed and rotated.
 
-* `POST /api/v1/wallet/provision` (recommended) — call from the dashboard, the bot, or anywhere after signup.
-* Set `AUTO_PROVISION_DVA_ON_SIGNUP=true` — signup does it inline. Switch on once your Paystack business is approved.
-
-## Architecture decision: webhook replay defense
-
-Paystack retries the same event on a network blip. We dedup on `(provider, event_id)` via the `webhook_events` table. The second delivery is a `200` no-op with a `webhook.replay` audit row, not a double-credit / double-debit.
-
-`event_id` is the Paystack `event.id` when present; we fall back to a SHA-256 of the raw body when the provider omits the field (older Paystack payloads).
-
-## Tests
+## Testing
 
 ```bash
-make test                 # full suite (integration + unit)
-make test-unit            # unit only
-make test-integration     # integration only
-make cov                  # coverage report
-pytest -k "wallet"        # filter by name
+pytest                                      # full suite
+pytest tests/unit                           # unit tests only
+pytest tests/integration                    # integration tests (needs PostgreSQL)
+pytest -k wallet                            # filter by test name
+pytest --cov=app --cov-report=term-missing  # coverage (gate: 70%)
+ruff check .                                # lint
+mypy app                                    # type check
 ```
 
-The integration tests need a Postgres database. The Makefile target `make test` spins up `docker-compose.test.yml` for you. For local runs, set:
+330 tests, about 35 seconds. Coverage is 76%.
+
+> **The suite never touches a non-test database.** The integration fixtures `TRUNCATE` every application table before and after each test, so the suite resolves its database from `TEST_DATABASE_URL` (default `postgresql://postgres:postgres@localhost:5432/autopay_test`) and refuses to run if the name does not contain "test". The check runs against the connected database, not the URL.
+
+Set up a test database once:
 
 ```bash
-export DATABASE_URL=postgresql://postgres:David*2020*@localhost:5432/autopay_test
-export JWT_SECRET_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(64))')"
-export FERNET_KEY="$(python -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')"
+psql -U postgres -h localhost -c "CREATE DATABASE autopay_test;"
+export DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/autopay_test
 pytest
 ```
 
-Current count: **178 tests passing** (12 auth, 6 wallet, 8 bill, 5 kyc, 9 webhook, 3 db-rollback, 12 telegram-handler, 5 scheduler, 10 agent, 8 audit, 5 crypto, 23 models, 7 payment-math, 17 paystack, 9 security, 4 smoke, 30 date-parser, 4 status/loader, + 1 OpenAPI security scheme test, + 1 WWW-Authenticate header test).
+`TEST_DATABASE_URL` (read from the environment or `.env`) points the suite at the throwaway database. `DATABASE_URL` only matters for Alembic and the app itself.
 
-## Project layout
+`tests/manual/` holds interactive scripts that drive a browser. They are not part of the automated suite and need Node.js.
+
+## Project structure
 
 ```
 app/
-  api/             HTTP routers (auth, bills, kyc, wallet, webhooks, health)
-  core/            config, database, logging, scheduler, security, http
-  handlers/        Telegram bot conversation handlers
-  models/          SQLModel ORM (8 tables)
-  schemas/         Pydantic DTOs
-  services/        business logic (auth, audit, loaders, payout, date_parser,
-                   payments/{base,exceptions,paystack}, telegram)
-  agents/          LangGraph decision agent
-  static/          static assets
-  templates/       Jinja templates
-migrations/        Alembic
-scripts/           entrypoint.sh, seed.py
-tests/             pytest suite
-.github/workflows/ CI
+  main.py              FastAPI app, routers, dashboard, lifespan (scheduler and bot)
+  api/                 REST routers: auth, bills, kyc, wallet, webhooks, health
+  agents/              LangGraph decision graph
+  core/                settings, database engine, security, scheduler, logging, metrics
+  handlers/            Telegram conversation handlers
+  models/              SQLModel table definitions
+  schemas/             Pydantic request and response models
+  services/            business logic: bills, payouts, wallet, auth, KYC, audit, extraction, Telegram
+  services/payments/   payment-provider interface and Paystack client
+  static/, templates/  web dashboard
+migrations/            Alembic environment and versions (0001 to 0004)
+scripts/               entrypoint.sh (Docker), seed.py (demo data)
+tests/                 pytest suite: unit/, integration/, manual/
+schema.sql             full PostgreSQL schema
+DOCUMENTATION.md       long-form design notes
+LICENSE                MIT
 ```
 
-## Webhook testing with ngrok (dev only)
+## Database migrations
 
-For real Paystack webhook testing, you need a public HTTPS URL pointing at your local `/webhooks/paystack`. `ngrok` is the cheapest way:
+- `0001_baseline` applies `schema.sql`. Every statement in it is idempotent, so it is safe on an empty database and on one that already has the schema.
+- `0002` to `0004` add the webhook-event table, the provider order reference, and the virtual-account customer code. They skip themselves when the object already exists.
+- For later changes, edit the models, then run `alembic revision --autogenerate -m "describe the change"` and `alembic upgrade head`.
+- Revision ids must stay within 32 characters: Alembic's `alembic_version.version_num` column is `VARCHAR(32)`.
+
+## Docker
+
+`docker-compose.yml` defines a PostgreSQL 16 service and the app image.
 
 ```bash
-# 1. Install: https://ngrok.com/download  (or `winget install ngrok`)
-# 2. Sign up, grab your authtoken from the dashboard, run once:
-ngrok config add-authtoken <your-token>
-
-# 3. Start the tunnel
-make ngrok
-# Copy the https URL it prints (e.g. https://abc123.ngrok-free.app)
-
-# 4. Update .env:
-WEBHOOK_URL=https://abc123.ngrok-free.app/telegram/webhook
-# (you'll also need to set the Paystack webhook URL in their dashboard
-# to https://abc123.ngrok-free.app/webhooks/paystack)
+docker compose up -d      # app on http://localhost:8000
+docker compose logs -f app
 ```
 
-Free ngrok gives you a random URL that changes every restart. `ngrok Pro` ($8/mo) lets you pin a static subdomain. Either is fine for development.
+The Postgres container loads `schema.sql` on first boot, and the app container waits for the database and applies the migrations before starting uvicorn. The image sets `ENVIRONMENT=production`, so it needs every secret in `.env`; set `ENVIRONMENT=development` in `.env` to relax that while developing.
 
-## Deploy to Railway
+The test image adds the dev dependencies:
 
-1. Push to GitHub.
-2. Create a new Railway project → "Deploy from GitHub repo".
-3. Add a Postgres database (Railway's "Provision PostgreSQL" plugin).
-4. Set environment variables in the Railway dashboard (use `make keygen` to generate):
-   - `DATABASE_URL` (Railway provides this as `${{Postgres.DATABASE_URL}}`)
-   - `JWT_SECRET_KEY`
-   - `BVN_ENCRYPTION_KEY`
-   - `PAYSTACK_SECRET_KEY` (live key, not test)
-   - `PAYSTACK_PUBLIC_KEY`
-   - `TELEGRAM_BOT_TOKEN`
-   - `TELEGRAM_BOT_USERNAME`
-   - `WEBHOOK_URL` (e.g. `https://<app>.up.railway.app/telegram/webhook`)
-   - `AUTO_PROVISION_DVA_ON_SIGNUP=true` (only if your Paystack business is approved for Dedicated NUBANs)
-5. Deploy. Railway will run `uvicorn app.main:app --host 0.0.0.0 --port $PORT` automatically (or override the start command).
-6. After first deploy, apply the schema: `railway run psql $DATABASE_URL < schema.sql`
-7. Update the Paystack dashboard to point at `https://<app>.up.railway.app/webhooks/paystack`.
+```bash
+docker compose -f docker-compose.test.yml run --rm app-test
+```
 
-## Production checklist
+GNU make is optional. `make help` lists the shortcuts (`up`, `test`, `migrate`, `seed`, `keygen`, `db-init`, and so on) if you have it installed; every target is a thin wrapper around the commands above.
 
-Before flipping the deploy from staging to prod:
+## Deployment
 
-- [ ] Replace all hardcoded secrets in `app/core/config.py` with empty defaults + startup assertion in `production` env.
-- [ ] Set `ENVIRONMENT=production` (turns on the secret-required startup check).
-- [ ] Set `JWT_SECRET_KEY` to a fresh 64-char value (not the dev one).
-- [ ] Set `BVN_ENCRYPTION_KEY` to a fresh Fernet key.
-- [ ] Set `PAYSTACK_SECRET_KEY` to a live key (`sk_live_...`).
-- [ ] Set `AUTO_PROVISION_DVA_ON_SIGNUP=true` only after Paystack business is approved for Dedicated NUBANs.
-- [ ] Configure the Paystack dashboard webhook URL.
-- [ ] Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_BOT_USERNAME` from @BotFather.
-- [ ] Set `WEBHOOK_URL` to your production Telegram webhook URL.
-- [ ] `git log -- pyproject.toml` and confirm no secrets were ever committed.
-- [ ] Run `pytest --cov=app` — coverage gate at 70% per `pyproject.toml`.
+Run a single app process: the scheduler and the Telegram bot live inside the app process, and a second worker would double-pay bills and fight over the Telegram webhook.
+
+### Production checklist
+
+- [ ] Rotate the credentials that were previously committed (see [Security](#security))
+- [ ] Set `ENVIRONMENT=production`
+- [ ] Set your own `DATABASE_URL`, `JWT_SECRET_KEY`, `BVN_ENCRYPTION_KEY`, `PAYSTACK_SECRET_KEY` (a live `sk_live_...` key), `TELEGRAM_BOT_TOKEN`, and `TELEGRAM_SECRET_TOKEN`
+- [ ] Set `WEBHOOK_URL=https://<host>/telegram/webhook`, and point Paystack's webhook URL at `https://<host>/webhooks/paystack`
+- [ ] Set `ALLOWED_ORIGINS` to your frontend's origin(s)
+- [ ] Keep `/metrics` on a private network
+- [ ] Enable `AUTO_PROVISION_DVA_ON_SIGNUP` only after Paystack approves Dedicated NUBAN for your business
+- [ ] Run one app process
+
+## Known gaps
+
+- **BVN is not validated against a registry.** BVNs are encrypted and stored, but no provider checks them, so `bvn_validated` stays `false`. Wiring it up means adding a BVN-verification provider.
+- **A transfer into a virtual account is credited from the webhook only.** If a webhook is lost, the transfer is not picked up by a background poll. The manual top-up verify endpoint covers Checkout top-ups, not virtual-account deposits.
+- **`/metrics` is unauthenticated.** It leaks request volume and business event rates; keep it on a private network.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

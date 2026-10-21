@@ -35,6 +35,12 @@ dependencies = [
     "python-multipart==0.0.20",
     "prometheus-client==0.21.1",
     "rapidfuzz==3.11.0",
+    # Local OCR fallback (when the LLM is down or unavailable).
+    # rapidocr = PaddleOCR models converted to ONNX, runs on onnxruntime
+    # (cross-platform, no PaddlePaddle framework dependency).
+    "rapidocr==3.9.1",
+    "onnxruntime==1.22.0",
+    "opencv-python-headless==4.11.0.86",
 ]
 
 [project.optional-dependencies]
