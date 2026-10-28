@@ -106,3 +106,39 @@ async def test_refresh_upserts_from_provider(session, stub_provider) -> None:
     assert count == 4
     assert [name for name, _ in stub_provider.calls] == ["list_banks"]
     assert stub_provider.calls[0][1] == {"country": "nigeria"}
+
+
+# ── test-only banks ────────────────────────────────────────────────
+
+def test_test_bank_is_seeded_outside_production(session, monkeypatch) -> None:
+    from sqlmodel import delete
+
+    from app.core.config import settings
+    from app.models.bank import Bank
+
+    session.exec(delete(Bank).where(Bank.code == "001"))
+    session.commit()
+
+    monkeypatch.setattr(settings, "environment", "development")
+    directory = get_bank_directory()
+    directory.ensure_loaded(session)
+
+    bank = directory.get(session, "001")
+    assert bank is not None
+    assert bank.name == "Test Bank"
+
+
+def test_test_bank_is_not_seeded_in_production(session, monkeypatch) -> None:
+    from sqlmodel import delete
+
+    from app.core.config import settings
+    from app.models.bank import Bank
+
+    session.exec(delete(Bank).where(Bank.code == "001"))
+    session.commit()
+
+    monkeypatch.setattr(settings, "environment", "production")
+    directory = get_bank_directory()
+    directory.ensure_loaded(session)
+
+    assert directory.get(session, "001") is None

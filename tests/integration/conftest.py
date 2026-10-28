@@ -256,6 +256,29 @@ class _StubPaystack:
         self.calls.append(("create_transfer_recipient", kwargs))
         return "RCP_test"
 
+    async def finalize_transfer(self, **kwargs):
+        """Completes an otp-parked transfer. Tests override as needed."""
+        from app.services.payments.base import TransferResult
+
+        self.calls.append(("finalize_transfer", kwargs))
+        return TransferResult(
+            provider_reference="",
+            provider_transfer_id="99",
+            status="success",
+            transfer_code=kwargs.get("transfer_code"),
+        )
+
+    async def get_transfer(self, **kwargs):
+        """Polls a transfer. Tests override to return pending/failed."""
+        from app.services.payments.base import TransactionStatusResult
+
+        self.calls.append(("get_transfer", kwargs))
+        return TransactionStatusResult(
+            provider_reference=kwargs.get("reference", ""),
+            status="success",
+            amount_kobo=None,
+        )
+
     async def list_banks(self, **kwargs):
         """Small fixed bank list so directory tests never hit the network.
 

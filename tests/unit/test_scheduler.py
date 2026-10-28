@@ -48,6 +48,27 @@ class _StubProvider:
         self.calls.append(("create_transfer_recipient", kwargs))
         return "RCP_test"
 
+    async def get_transfer(self, **kwargs):
+        from app.services.payments.base import TransactionStatusResult
+
+        self.calls.append(("get_transfer", kwargs))
+        return TransactionStatusResult(
+            provider_reference=kwargs.get("reference", ""),
+            status="success",
+            amount_kobo=None,
+        )
+
+    async def finalize_transfer(self, **kwargs):
+        from app.services.payments.base import TransferResult
+
+        self.calls.append(("finalize_transfer", kwargs))
+        return TransferResult(
+            provider_reference="",
+            provider_transfer_id="99",
+            status="success",
+            transfer_code=kwargs.get("transfer_code"),
+        )
+
     async def list_banks(self, **kwargs):
         from app.services.payments.base import BankInfo
 

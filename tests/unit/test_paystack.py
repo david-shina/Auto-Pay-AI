@@ -399,3 +399,79 @@ def test_generic_provider_error_stays_retryable() -> None:
     exc = _map_paystack_error(500, {"message": "Internal server error", "data": None})
     assert isinstance(exc, ProviderError)
     assert not isinstance(exc, InvalidAccountError)
+
+
+# ── finalize / verify transfers ────────────────────────────────────
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_finalize_transfer_success() -> None:
+    route = respx.post(f"{PAYSTACK}/transfer/finalize_transfer").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": True,
+                "data": {
+                    "id": 1,
+                    "reference": "autopay_1_abc",
+                    "transfer_code": "TRF_abc",
+                    "status": "success",
+                },
+            },
+        )
+    )
+    p = _client()
+    out = await p.finalize_transfer(transfer_code="TRF_abc", otp="123456")
+
+    assert out.status == "success"
+    assert out.provider_reference == "autopay_1_abc"
+    assert out.transfer_code == "TRF_abc"
+    body = json.loads(route.calls[0].request.content)
+    assert body == {"transfer_code": "TRF_abc", "otp": "123456"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_transfer_maps_otp_to_pending() -> None:
+    respx.get(f"{PAYSTACK}/transfer/verify/autopay_1_abc").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": True,
+                "data": {
+                    "reference": "autopay_1_abc",
+                    "status": "otp",
+                    "amount": 500000,
+                },
+            },
+        )
+    )
+    p = _client()
+    out = await p.get_transfer(reference="autopay_1_abc")
+
+    # "otp" means the money has not moved yet.
+    assert out.status == "pending"
+    assert out.amount_kobo == 500000
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_transfer_success_and_failure() -> None:
+    route = respx.get(f"{PAYSTACK}/transfer/verify/ref-1")
+    p = _client()
+
+    route.mock(return_value=httpx.Response(200, json={"status": True, "data": {"status": "success"}}))
+    assert (await p.get_transfer(reference="ref-1")).status == "success"
+
+    route.mock(return_value=httpx.Response(200, json={"status": True, "data": {"status": "failed"}}))
+    assert (await p.get_transfer(reference="ref-1")).status == "failed"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_transfer_unknown_status() -> None:
+    respx.get(f"{PAYSTACK}/transfer/verify/ref-2").mock(
+        return_value=httpx.Response(200, json={"status": True, "data": {"status": "weird"}})
+    )
+    p = _client()
+    assert (await p.get_transfer(reference="ref-2")).status == "unknown"
