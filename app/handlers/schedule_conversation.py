@@ -53,6 +53,7 @@ from app.handlers.helpers import (
     escape_md,
     get_linked_user,
     parse_user_date,
+    safe_edit,
 )
 from app.services.bill import (
     BillValidationError,
@@ -304,7 +305,7 @@ async def handle_bank_picked(
     # Parse `sch_bank:<code>:<name>`.
     parts = query.data.split(":", 2)
     if len(parts) != 3:
-        await query.edit_message_text("⚠️ Bad bank choice. Run /schedule again.")
+        await safe_edit(query, "⚠️ Bad bank choice. Run /schedule again.")
         return ConversationHandler.END
     _, code, name = parts
     # Button labels are truncated to fit Telegram's 64-byte
@@ -322,7 +323,7 @@ async def handle_bank_other(
     """User tapped 'Other' — ask them to type a bank name or code."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "🏦 *Type the bank name or code*\n\n"
         "For example `GTBank`, `Access Bank`, `UBA`, or the numeric code "
         "`058`. If several banks match, I'll show you the options.",
@@ -480,13 +481,13 @@ async def handle_confirm_yes(
     """User tapped 'Schedule it'. Persist the bill and notify."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("⏳ Saving your bill...")
+    await safe_edit(query, "⏳ Saving your bill...")
 
     data = context.user_data.get("sch", {})
     chat_id = str(query.message.chat_id)
     user = get_linked_user(chat_id)
     if user is None:
-        await query.edit_message_text("🔒 Account not linked. Run /link first.")
+        await safe_edit(query, "🔒 Account not linked. Run /link first.")
         context.user_data.pop("sch", None)
         return ConversationHandler.END
 
@@ -504,7 +505,7 @@ async def handle_confirm_yes(
         with session_scope() as session:
             bill = create_scheduled_bill(session, user_id=user.id, payload=payload)
     except BillValidationError as exc:
-        await query.edit_message_text(f"⚠️ {exc}\n\nRun /schedule again.")
+        await safe_edit(query, f"⚠️ {exc}\n\nRun /schedule again.")
         context.user_data.pop("sch", None)
         return ConversationHandler.END
 
@@ -525,7 +526,7 @@ async def handle_confirm_yes(
         f"🔁 Repeat: {recur_label}\n\n"
         f"I'll auto-pay it on the due date. Run /bills to see it any time."
     )
-    await query.edit_message_text(body, parse_mode="Markdown")
+    await safe_edit(query, body, parse_mode="Markdown")
     context.user_data.pop("sch", None)
     return ConversationHandler.END
 
@@ -569,7 +570,7 @@ async def handle_confirm_edit(
         [InlineKeyboardButton("⬅️ Back to confirm", callback_data="sch_edit:back")],
         [InlineKeyboardButton("❌ Cancel", callback_data="sch_cancel")],
     ]
-    await query.edit_message_text(
+    await safe_edit(query, 
         text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows)
     )
     return SCH_CONFIRM
@@ -587,35 +588,35 @@ async def handle_edit_field(
     if field == "back":
         return await _show_confirm(query, context)
     if field == "vendor":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "*Re-enter the vendor name:*\n"
             f"Current: `{escape_md(context.user_data.get('sch', {}).get('vendor_name', 'N/A'))}`",
             parse_mode="Markdown",
         )
         return SCH_VENDOR
     if field == "amount":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "*Re-enter the amount:*\n"
             f"Current: `₦{float(context.user_data.get('sch', {}).get('amount', 0)):,.2f}`",
             parse_mode="Markdown",
         )
         return SCH_AMOUNT
     if field == "account":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "*Re-enter the account number:*\n"
             f"Current: `{escape_md(str(context.user_data.get('sch', {}).get('account_number', 'N/A')))}`",
             parse_mode="Markdown",
         )
         return SCH_ACCOUNT
     if field == "date":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "*Re-pick the first due date:*",
             parse_mode="Markdown",
             reply_markup=date_quick_pick_keyboard(),
         )
         return SCH_DATE
     if field == "recur":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "*Re-pick the recurrence interval:*",
             parse_mode="Markdown",
             reply_markup=recurrence_keyboard(),
@@ -636,7 +637,7 @@ async def handle_cancel(
         with contextlib.suppress(Exception):
             await query.answer()
         if hasattr(query, "edit_message_text"):
-            await query.edit_message_text(
+            await safe_edit(query, 
                 "❌ Schedule cancelled. Run /schedule whenever you're ready."
             )
     else:
@@ -665,7 +666,7 @@ async def handle_back_account(
 ) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "*Step 3/6 — Account number*\n"
         "What's the destination account number? (10–11 digits)",
         parse_mode="Markdown",
@@ -678,7 +679,7 @@ async def handle_back_bank(
 ) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "*Step 4/6 — Bank*\n"
         "Pick the bank, or tap *Other* to type its name or code.",
         parse_mode="Markdown",
@@ -692,7 +693,7 @@ async def handle_back_date(
 ) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "*Step 5/6 — First due date*\n"
         "When should the first payment happen?",
         parse_mode="Markdown",
@@ -708,7 +709,7 @@ async def _go_to_date(query, context) -> int:
     """Common transition: bank picked → show the date keyboard."""
     bank = context.user_data["sch"].get("bank_name", "?")
     code = context.user_data["sch"].get("bank_code", "?")
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"✅ Bank: *{escape_md(bank)}* (`{escape_md(code)}`)\n\n"
         f"*Step 5/6 — First due date*\n"
         f"When should the first payment happen?",
@@ -722,7 +723,7 @@ async def _go_to_recurrence(query, context) -> int:
     """Common transition: date picked → show the recurrence keyboard."""
     due_date = context.user_data["sch"].get("due_date")
     due_label = due_date.date().isoformat() if due_date else "?"
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"✅ First due: *{escape_md(due_label)}*\n\n"
         f"*Step 6/6 — Repeat*\n"
         f"Should this bill repeat, or is it a one-off?",
@@ -771,7 +772,7 @@ async def _show_confirm(query, context) -> int:
         f"🔁 Repeat: *{recur_label}*\n\n"
         f"Looks good?"
     )
-    await query.edit_message_text(
+    await safe_edit(query, 
         text, parse_mode="Markdown", reply_markup=confirm_keyboard()
     )
     return SCH_CONFIRM

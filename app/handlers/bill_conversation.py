@@ -51,6 +51,7 @@ from app.handlers.helpers import (
     get_linked_user,
     multi_field_editor_keyboard,
     parse_user_date,
+    safe_edit,
 )
 from app.models.bill import Bill
 from app.models.enums import BillStatus
@@ -184,13 +185,13 @@ async def handle_confirm(
 ) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("🤖 Analysing payment...")
+    await safe_edit(query, "🤖 Analysing payment...")
 
     bill_data = context.user_data.get("bill", {})
     user_id = context.user_data.get("user_id")
 
     if not user_id or not bill_data:
-        await query.edit_message_text(
+        await safe_edit(query, 
             "Session expired. Send the bill again."
         )
         return ConversationHandler.END
@@ -291,7 +292,7 @@ async def handle_resolve_account(
 
     if not bank_code:
         hint = f" ({escape_md(bank_name)})" if bank_name else ""
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"🏦 *Bank not recognised*{hint}\n\n"
             f"I couldn't match this bill's bank to a supported bank, so I "
             f"can't verify the account. Pick the bank again, then retry "
@@ -311,7 +312,7 @@ async def handle_resolve_account(
             "account resolution failed (bill=%s bank=%s): %s",
             context.user_data.get("bill_id"), bank_code, exc,
         )
-        await query.edit_message_text(
+        await safe_edit(query, 
             "❌ *Account could not be resolved*\n\n"
             "The account number and bank on this bill don't match anything "
             "at the bank. Check the account number and the bank, then try "
@@ -328,7 +329,7 @@ async def handle_resolve_account(
             "bank lookup failed (bill=%s bank=%s): %s",
             context.user_data.get("bill_id"), bank_code, exc,
         )
-        await query.edit_message_text(
+        await safe_edit(query, 
             "❌ *Bank lookup failed*\n\n"
             "The bank couldn't verify this account right now. Please try "
             "again in a moment.",
@@ -344,7 +345,7 @@ async def handle_resolve_account(
         # Surface the mismatch with both names so the user can spot
         # the typo. We don't auto-correct because "DSTV" vs "GOTV"
         # is a *legal* difference (they're different companies).
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"❌ *Account name mismatch*\n\n"
             f"Bill vendor: *{escape_md(vendor_name)}*\n"
             f"Bank account: *{escape_md(resolved_name)}*\n"
@@ -392,7 +393,7 @@ async def _run_agent_decision(
     Lifted out of the original `handle_confirm` so we can call it
     from the RESOLVING state after a clean name match, or skip
     straight to it when the bill has no payout account at all."""
-    await query.edit_message_text("🤖 Analysing payment...")
+    await safe_edit(query, "🤖 Analysing payment...")
 
     user_balance = Decimal(str(context.user_data.get("user_balance", "0")))
     bill_id = context.user_data.get("bill_id")
@@ -400,7 +401,7 @@ async def _run_agent_decision(
     with session_scope() as session:
         bill = session.get(Bill, bill_id)
         if bill is None:
-            await query.edit_message_text("Session expired. Send the bill again.")
+            await safe_edit(query, "Session expired. Send the bill again.")
             return ConversationHandler.END
 
     days_until_due = (bill.due_date - datetime.now()).days
@@ -426,7 +427,7 @@ async def _run_agent_decision(
             if resolved_name
             else ""
         )
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"🤖 *Agent says: Pay Now*\n"
             f"_{decision.reason}_\n\n"
             f"💳 *Payment Summary*\n"
@@ -449,7 +450,7 @@ async def _run_agent_decision(
             if bill:
                 bill.status = BillStatus.SCHEDULED.value
                 session.add(bill)
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"🤖 *Agent says: Schedule*\n"
             f"_{decision.reason}_\n\n"
             f"🗓 *Payment Scheduled*\n\n"
@@ -464,7 +465,7 @@ async def _run_agent_decision(
     # Decision.HOLD
     fee = Decimal(str(settings.payout_fee_ngn))
     total = Decimal(str(bill.amount)) + fee
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"🤖 *Agent says: Hold*\n"
         f"_{decision.reason}_\n\n"
         f"⏸ *Payment on Hold*\n\n"
@@ -490,7 +491,7 @@ async def handle_edit(
     await query.answer()
     bill_data = context.user_data.get("bill", {})
     edited = context.user_data.get("edited_keys", set())
-    await query.edit_message_text(
+    await safe_edit(query, 
         format_multi_field_editor(bill_data, edited),
         parse_mode="Markdown",
         reply_markup=multi_field_editor_keyboard(bill_data, edited),
@@ -515,7 +516,7 @@ async def handle_edit_field(
     if field_key == "due_date":
         # Date has its own quick-pick UX — show buttons + an input
         # prompt so the user has both options.
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"📅 Editing *Due date*\n"
             f"Current value: `{escape_md(str(current))}`\n\n"
             "_Pick a quick option, or type a date (e.g. `2026-12-31`):_",
@@ -526,7 +527,7 @@ async def handle_edit_field(
         # type a date (typed text goes through `handle_new_value`).
         return EDIT_LIST
 
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"✏️ Editing *{label}*\n"
         f"Current value: `{escape_md(str(current))}`\n\n"
         "_Type the new value, or tap a field below to switch:_",
@@ -556,7 +557,7 @@ async def handle_date_quickpick(
     edited = context.user_data.setdefault("edited_keys", set())
     edited.add("due_date")
 
-    await query.edit_message_text(
+    await safe_edit(query, 
         format_multi_field_editor(bill_data, edited),
         parse_mode="Markdown",
         reply_markup=multi_field_editor_keyboard(bill_data, edited),
@@ -574,7 +575,7 @@ async def handle_edit_done(
     bill_data = context.user_data.get("bill", {})
     # Clear the edited-keys marker so a future edit session starts fresh.
     context.user_data["edited_keys"] = set()
-    await query.edit_message_text(
+    await safe_edit(query, 
         format_bill_summary(bill_data),
         parse_mode="Markdown",
         reply_markup=confirm_keyboard(),
@@ -594,7 +595,7 @@ async def handle_edit_discard(
     if original:
         context.user_data["bill"] = dict(original)
     context.user_data["edited_keys"] = set()
-    await query.edit_message_text(
+    await safe_edit(query, 
         format_bill_summary(context.user_data["bill"]),
         parse_mode="Markdown",
         reply_markup=confirm_keyboard(),
@@ -609,7 +610,7 @@ async def handle_cancel(
 ) -> int:
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text("❌ Bill cancelled. Send another bill whenever you're ready.")
+    await safe_edit(query, "❌ Bill cancelled. Send another bill whenever you're ready.")
     # Clean up the persisted bill if any
     bill_id = context.user_data.get("bill_id")
     if bill_id:
@@ -712,10 +713,10 @@ async def handle_final_confirm(
     user_balance = Decimal(str(context.user_data.get("user_balance", "0")))
 
     if not bill_id:
-        await query.edit_message_text("Session expired. Send the bill again.")
+        await safe_edit(query, "Session expired. Send the bill again.")
         return ConversationHandler.END
 
-    await query.edit_message_text("⏳ Processing payment...")
+    await safe_edit(query, "⏳ Processing payment...")
 
     provider: PaymentProvider = get_payment_provider()
     try:
@@ -724,7 +725,7 @@ async def handle_final_confirm(
             session.commit()
     except Exception as exc:
         logger.warning("payout failed for bill %d: %s", bill_id, exc)
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"❌ *Payment Failed*\n\nReason: {exc}\n\nPlease try again or top up your wallet.",
             parse_mode="Markdown",
         )
@@ -733,7 +734,7 @@ async def handle_final_confirm(
 
     fee = Decimal(str(settings.payout_fee_ngn))
     total = Decimal(str(bill_data.get("amount", 0))) + fee
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"✅ *Payment Initiated*\n\n"
         f"₦{float(bill_data.get('amount', 0)):,.2f} → "
         f"*{escape_md(bill_data.get('vendor_name', ''))}*\n"

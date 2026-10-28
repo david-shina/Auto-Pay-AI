@@ -42,7 +42,7 @@ from telegram.ext import (
 )
 
 from app.core.database import session_scope
-from app.handlers.helpers import escape_md, get_linked_user
+from app.handlers.helpers import escape_md, get_linked_user, safe_edit
 from app.services import payments as _payments_pkg
 from app.services.payments import PaymentError
 from app.services.wallet import (
@@ -174,7 +174,7 @@ async def handle_quickpick(
     try:
         amount = int(query.data.replace("topup_amount:", ""))
     except (ValueError, AttributeError):
-        await query.edit_message_text(
+        await safe_edit(query, 
             "⚠️ Couldn't read that amount. Run /topup again."
         )
         return ConversationHandler.END
@@ -196,7 +196,7 @@ async def handle_custom(
     """User tapped the Custom button → ask them to type an amount."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "✏️ *Custom top-up amount*\n\n"
         f"Type the amount in NGN (e.g. `7500` or `12,500.00`).\n"
         f"_Range: ₦{int(MIN_TOPUP_NGN):,} – ₦{int(MAX_TOPUP_NGN):,}_",
@@ -215,7 +215,7 @@ async def handle_custom_back(
     """User tapped Back from the custom prompt → re-show quick-pick."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "💸 *Top up your wallet*\n\n"
         "Choose an amount, or tap *Custom* to type your own.",
         parse_mode="Markdown",
@@ -293,7 +293,7 @@ async def handle_cancel(
         with contextlib.suppress(Exception):
             await query.answer()
     if hasattr(query, "edit_message_text"):
-        await query.edit_message_text(
+        await safe_edit(query, 
             "❌ Top-up cancelled. Run /topup whenever you're ready."
         )
     elif hasattr(query, "message") and hasattr(query.message, "reply_text"):
@@ -310,7 +310,7 @@ async def handle_done_again(
     quick-pick keyboard."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "💸 *Top up your wallet*\n\n"
         "Choose an amount, or tap *Custom* to type your own.",
         parse_mode="Markdown",
@@ -330,12 +330,12 @@ async def handle_done_balance(
     user = get_linked_user(chat_id)
     if user is None:
         # Should never happen mid-conversation, but defend anyway.
-        await query.edit_message_text(
+        await safe_edit(query, 
             "🔒 Account not linked. Run /link first."
         )
         return ConversationHandler.END
     balance = float(user.balance)
-    await query.edit_message_text(
+    await safe_edit(query, 
         f"💼 *Your wallet balance*\n\n"
         f"₦{balance:,.2f}\n\n"
         f"_Your wallet will be credited automatically when Paystack "
@@ -351,7 +351,7 @@ async def handle_done_close(
     """User tapped the final "Done" — just acknowledge and end."""
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await safe_edit(query, 
         "👍 *All set.*\n\n"
         "Your wallet will be credited automatically as soon as "
         "Paystack confirms the top-up. Run /transactions to see "
@@ -460,7 +460,7 @@ async def _reply(query, edit: bool, text: str, **kwargs) -> None:
     user came from a callback query) or as a new reply (if they
     came from a typed message in the custom-amount flow)."""
     if edit and hasattr(query, "edit_message_text"):
-        await query.edit_message_text(text, **kwargs)
+        await safe_edit(query, text, **kwargs)
     else:
         target = getattr(query, "_msg", None) or getattr(query, "message", None)
         if target is not None and hasattr(target, "reply_text"):
@@ -489,7 +489,7 @@ async def handle_verify(
     # Pull the reference out of the callback data.
     ref = (query.data or "").replace("topup_verify:", "", 1)
     if not ref:
-        await query.edit_message_text(
+        await safe_edit(query, 
             "⚠️ Couldn't read the reference. Please try again."
         )
         return ConversationHandler.END
@@ -497,7 +497,7 @@ async def handle_verify(
     chat_id = str(query.message.chat_id)
     user = get_linked_user(chat_id)
     if user is None:
-        await query.edit_message_text(
+        await safe_edit(query, 
             "🔒 Account not linked. Run /link first."
         )
         return ConversationHandler.END
@@ -510,25 +510,25 @@ async def handle_verify(
             )
     except Exception:
         logger.exception("handle_verify failed for user %d ref %s", user.id, ref)
-        await query.edit_message_text(
+        await safe_edit(query, 
             "❌ Verification failed. Please try again in a moment."
         )
         return TOPUP_DONE
 
     if result.credited:
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"✅ *Payment confirmed!*\n\n"
             f"Your wallet is now *₦{float(result.new_balance):,.2f}*.",
             parse_mode="Markdown",
         )
     elif result.status == "already_credited":
-        await query.edit_message_text(
+        await safe_edit(query, 
             f"✅ Already credited — your wallet is "
             f"*₦{float(result.new_balance):,.2f}*.",
             parse_mode="Markdown",
         )
     elif result.status == "provider_pending":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "⏳ *Still pending.*\n\n"
             "The provider hasn't confirmed the payment yet. "
             "Give it a few seconds and tap *I've paid* again.",
@@ -542,21 +542,21 @@ async def handle_verify(
             ]),
         )
     elif result.status == "provider_failed":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "❌ *Payment failed.*\n\n"
             "The provider says the payment didn't go through. "
             "Please retry from /topup.",
             parse_mode="Markdown",
         )
     elif result.status == "provider_reversed":
-        await query.edit_message_text(
+        await safe_edit(query, 
             "↩️ *Payment reversed.*\n\n"
             "The provider reversed this payment. Your wallet was "
             "not credited. Contact support if this is wrong.",
             parse_mode="Markdown",
         )
     else:  # unknown_reference / provider_unknown
-        await query.edit_message_text(
+        await safe_edit(query, 
             "⚠️ *Couldn't verify.*\n\n"
             "We couldn't find that top-up. Double-check the reference "
             "or wait a moment and try again.",

@@ -7,13 +7,17 @@ tells the user to run /link.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 
 from app.core.database import session_scope
 from app.models.user import User
 from app.models.virtual_account import VirtualAccount
+
+logger = logging.getLogger(__name__)
 
 # ── Editable fields the user can correct on the extracted bill ──────
 
@@ -236,6 +240,36 @@ def escape_md(text: str) -> str:
     return text
 
 
+# ── Safe message edit ───────────────────────────────────────────────
+
+async def safe_edit(query, text: str, **kwargs) -> None:
+    """`query.edit_message_text(...)` that tolerates Telegram's 400.
+
+    Telegram rejects an edit when the new text and reply markup are
+    identical to what the message already shows:
+
+        400 BadRequest: Message is not modified: specified new message
+        content and reply markup are exactly the same as a current
+        content and reply markup of the message
+
+    That happens whenever the user taps the same button twice, or when a
+    flow re-enters a state that already left that text on screen. It is
+    not an error condition, but if it escapes it reaches the bot's error
+    handler and shows up as "Unhandled exception in bot".
+
+    Only that specific BadRequest is swallowed - any other Telegram
+    error (message deleted, can't be edited, chat not found, ...) still
+    propagates to the caller.
+    """
+    try:
+        await query.edit_message_text(text, **kwargs)
+    except BadRequest as exc:
+        if "message is not modified" in str(exc).lower():
+            logger.debug("safe_edit: message unchanged, edit skipped")
+            return
+        raise
+
+
 __all__ = [
     "EDITABLE_FIELDS",
     "confirm_keyboard",
@@ -250,4 +284,5 @@ __all__ = [
     "get_user_va",
     "multi_field_editor_keyboard",
     "parse_user_date",
+    "safe_edit",
 ]
