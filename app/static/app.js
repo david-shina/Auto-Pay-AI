@@ -124,6 +124,16 @@ const API = (() => {
       create: (d) => request("POST", "/bills", d),
       pay: (id) => request("POST", `/bills/${id}/pay`),
       cancel: (id) => request("POST", `/bills/${id}/cancel`),
+      // Set / correct the payee bank. `bank_code` accepts a code or a
+      // name; the server resolves it and stores a real code.
+      setBank: (id, d) => request("PATCH", `/bills/${id}`, d),
+    },
+
+    banks: {
+      // Empty `q` returns an alphabetical starter list for the dropdown.
+      search: (q, limit = 20) =>
+        request("GET", `/banks?q=${encodeURIComponent(q || "")}&limit=${limit}`),
+      resolve: (q) => request("GET", `/banks/resolve?q=${encodeURIComponent(q)}`),
     },
 
     kyc: {
@@ -418,15 +428,109 @@ async function loadBills(statusFilter = "") {
 function billRow(b) {
   const isPending = b.status === "pending" || b.status === "scheduled" || b.status === "hold";
   const isCancellable = b.status === "pending" || b.status === "scheduled";
+  const needsBank = !b.bank_code && isPending;
   return `<tr>
     <td>${esc(b.vendor_name)}</td>
     <td>${fmtMoney(b.amount)}</td>
     <td>${fmtDate(b.due_date)}</td>
     <td>${statusBadge(b.status)}</td>
     <td class="flex gap-2">
+      ${needsBank ? `<button class="btn-lime text-xs py-1 px-3" onclick="openBankPicker(${b.id})">Set bank</button>` : ""}
       ${isPending ? `<button class="btn-lime text-xs py-1 px-3" onclick="payBill(${b.id})">Pay now</button>` : ""}
       ${isCancellable ? `<button class="btn-danger text-xs py-1" onclick="cancelBill(${b.id})">Cancel</button>` : ""}
     </td></tr>`;
+}
+
+// Ask the server which banks match what the user typed, then let them
+// pick one. Deliberately never auto-picks: a wrong bank code sends real
+// money to the wrong account.
+function openBankPicker(billId, onSaved) {
+  document.getElementById("bank-modal")?.remove();
+
+  const wrap = document.createElement("div");
+  wrap.id = "bank-modal";
+  wrap.setAttribute(
+    "style",
+    "position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;" +
+      "align-items:center;justify-content:center;z-index:1000;padding:1rem"
+  );
+  wrap.innerHTML = `
+    <div class="card p-6" style="width:min(28rem,100%);max-height:85vh;overflow:auto">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-syne text-lg font-bold">Payee bank</h3>
+        <button class="btn-ghost text-sm" id="bank-modal-close">Close</button>
+      </div>
+      <p class="text-sm text-mute mb-3">Pick the bank that owns the destination account.</p>
+      <input class="input" id="bank-modal-q" placeholder="Search, e.g. GTBank or 058" />
+      <select class="input mt-2" id="bank-modal-sel" size="7"></select>
+      <button class="btn-lime w-full mt-3" id="bank-modal-save">Save bank</button>
+      <p class="text-xs text-mute mt-2" id="bank-modal-hint"></p>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const input = document.getElementById("bank-modal-q");
+  const sel = document.getElementById("bank-modal-sel");
+  const save = document.getElementById("bank-modal-save");
+  const hint = document.getElementById("bank-modal-hint");
+
+  let timer = null;
+
+  async function refresh(q) {
+    try {
+      const rows = await API.banks.search(q);
+      sel.innerHTML = rows.length
+        ? rows
+            .map(
+              (r) =>
+                `<option value="${esc(r.code)}">${esc(r.name)} (${esc(r.code)})</option>`
+            )
+            .join("")
+        : `<option value="">No matching banks</option>`;
+      if (q && rows.length === 1 && rows[0].exact) {
+        hint.textContent = `Exact match: ${rows[0].name}`;
+      } else if (q) {
+        hint.textContent = `${rows.length} match(es) - choose one explicitly.`;
+      } else {
+        hint.textContent = "";
+      }
+    } catch (err) {
+      sel.innerHTML = `<option value="">Bank search unavailable</option>`;
+    }
+  }
+
+  function close() {
+    wrap.remove();
+  }
+
+  document.getElementById("bank-modal-close").onclick = close;
+  wrap.addEventListener("click", (e) => {
+    if (e.target === wrap) close();
+  });
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => refresh(input.value.trim()), 250);
+  });
+
+  save.addEventListener("click", async () => {
+    const code = sel.value;
+    if (!code) {
+      toast("Pick a bank first.", "error");
+      return;
+    }
+    save.disabled = true;
+    try {
+      const bill = await API.bills.setBank(billId, { bank_code: code });
+      close();
+      toast(`Payee bank set to ${bill.bank_name}.`, "success");
+      if (typeof onSaved === "function") onSaved(bill);
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      save.disabled = false;
+    }
+  });
+
+  refresh("");
 }
 
 function filterBills(status, btn) {
@@ -553,6 +657,12 @@ async function handleUpload() {
           </div>
         </div>` : ""}
         ${res.message ? `<p class="text-sm text-mute mt-3">${esc(res.message)}</p>` : ""}
+        ${!b.bank_code ? `
+        <div class="card-2 p-4 mt-4">
+          <div class="label mb-1">Payee bank</div>
+          <p class="text-sm text-mute mb-3">We couldn't match this bill's bank, so it can't be paid yet.</p>
+          <button class="btn-lime text-xs py-1 px-3" onclick="openBankPicker(${b.id})">Set payee bank</button>
+        </div>` : ""}
       </div>`;
     toast(res.message || "Bill uploaded!", "success");
   } catch (err) {
