@@ -149,6 +149,75 @@ def test_scheduled_jobs_are_active(_scheduler_lifecycle) -> None:
         )
 
 
+def test_async_scheduler_job_runs_in_a_private_loop(monkeypatch) -> None:
+    """`async def` jobs are driven with asyncio.run() on a fresh loop."""
+    from app.core import scheduler as scheduler_module
+    from app.core.config import settings
+
+    calls: list[str] = []
+
+    async def _job() -> None:
+        calls.append("async")
+
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    scheduler_module._run_sync_in_private_loop("test_async_job", _job)()
+
+    assert calls == ["async"]
+
+
+def test_sync_scheduler_job_is_called_directly(monkeypatch) -> None:
+    """`def` jobs must be invoked directly, not passed to asyncio.run().
+
+    Regression: `_process_scheduled_bills` and `_process_recurring_bills`
+    are plain sync functions. Wrapping them with `asyncio.run(fn())`
+    evaluated them to `None` and raised
+    `ValueError: a coroutine was expected, got None`, so those jobs
+    never ran - every scheduler tick quietly did nothing.
+    """
+    from app.core import scheduler as scheduler_module
+    from app.core.config import settings
+
+    calls: list[str] = []
+
+    def _job() -> None:
+        calls.append("sync")
+
+    monkeypatch.setattr(settings, "scheduler_enabled", True)
+    scheduler_module._run_sync_in_private_loop("test_sync_job", _job)()
+
+    assert calls == ["sync"]
+
+
+def test_sync_scheduler_job_honours_disabled_flag(monkeypatch) -> None:
+    from app.core import scheduler as scheduler_module
+    from app.core.config import settings
+
+    calls: list[str] = []
+
+    def _job() -> None:
+        calls.append("sync")
+
+    monkeypatch.setattr(settings, "scheduler_enabled", False)
+    scheduler_module._run_sync_in_private_loop("test_sync_job", _job)()
+
+    assert calls == []
+
+
+def test_real_jobs_are_registered_with_the_shape_they_expect() -> None:
+    """Guard the specific pair that broke: both pay jobs are sync."""
+    from app.core import scheduler as scheduler_module
+
+    assert not __import__("inspect").iscoroutinefunction(
+        scheduler_module._process_scheduled_bills
+    )
+    assert not __import__("inspect").iscoroutinefunction(
+        scheduler_module._process_recurring_bills
+    )
+    assert __import__("inspect").iscoroutinefunction(
+        scheduler_module._refresh_banks
+    )
+
+
 def test_scheduler_jobs_are_skipped_when_disabled(
     _scheduler_lifecycle, monkeypatch
 ) -> None:

@@ -30,6 +30,7 @@ BackgroundScheduler (job runs on a thread) and AsyncIOScheduler
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -121,15 +122,27 @@ def get_scheduler() -> object | None:
 # ── Job runners ─────────────────────────────────────────────────────
 
 def _run_sync_in_private_loop(job_id: str, fn):
-    """Wrap an async function as a sync callable that runs it in its
-    own event loop. Required because the async payout path
-    (`execute_payout`) needs a running loop, but APScheduler's
-    `BackgroundScheduler` doesn't provide one.
+    """Wrap a job callable as a sync callable APScheduler can invoke.
 
-    For `AsyncIOScheduler`, the job runs in a thread pool inside
-    AsyncIO's loop; we still use `asyncio.run()` (creates a sub-loop)
-    so we don't have to special-case the two schedulers.
+    Two job shapes are registered, and they need different treatment:
+
+      * `async def` jobs (e.g. `_refresh_banks`) need a running event
+        loop, so we drive them with `asyncio.run()` on a private loop.
+        This works for both `BackgroundScheduler` (the job runs on a
+        worker thread) and `AsyncIOScheduler` (the job is dispatched to
+        a thread pool), because neither provides a loop to the job.
+      * plain `def` jobs (e.g. `_process_scheduled_bills`) must be
+        called directly. `asyncio.run(fn())` on a sync function
+        evaluates `fn()` immediately, gets `None`, and raises
+        `ValueError: a coroutine was expected, got None` - which the
+        handler below logged and swallowed, so those jobs silently
+        never ran.
+
+    Dispatching on `inspect.iscoroutinefunction` keeps both shapes
+    working without the caller having to pick the right wrapper.
     """
+    is_coroutine = inspect.iscoroutinefunction(fn)
+
     def wrapper() -> None:
         # The scheduler is always started so that its lifecycle is
         # observable, but the job body is a no-op when the scheduler is
@@ -141,11 +154,15 @@ def _run_sync_in_private_loop(job_id: str, fn):
             logger.info("Scheduler job %s skipped (scheduler_enabled=false)", job_id)
             return
         try:
-            asyncio.run(fn())
+            if is_coroutine:
+                asyncio.run(fn())
+            else:
+                fn()
         except Exception:
             logger.exception("Scheduler job %s raised", job_id)
 
     return wrapper
+
 
 
 async def _refresh_banks() -> None:
