@@ -50,6 +50,14 @@ SNAPSHOT_PATH: Final[Path] = Path(__file__).with_name("data") / "banks_ng.json"
 _MIN_SCORE: Final[int] = 60
 _MAX_MATCHES: Final[int] = 8
 
+# Institutions that only exist in the provider's TEST mode. They are not
+# in the live `GET /bank` response, so they have to be seeded
+# explicitly. Code `001` is what Paystack's own API tells you to use once
+# the 3 live bank resolves per day are exhausted in test mode.
+_TEST_BANKS: Final[tuple[BankInfo, ...]] = (
+    BankInfo(code="001", name="Test Bank", slug="test-bank", type="nuban"),
+)
+
 # Acronyms and short forms people actually type on bills. These are
 # only trusted when the target code is present in the `banks` table, so
 # a stale entry degrades to fuzzy matching instead of pointing at a
@@ -182,6 +190,8 @@ class BankDirectory:
 
         session.commit()
         logger.info("bank refresh: %d banks synced", len(seen))
+        # The live list never contains the provider's test-only banks.
+        self._ensure_test_banks(session)
         return len(seen)
 
     def export_snapshot(self, session: Session) -> int:
@@ -210,27 +220,54 @@ class BankDirectory:
 
     def ensure_loaded(self, session: Session) -> None:
         """Seed the table from the committed snapshot if it is empty."""
-        if session.exec(select(Bank).limit(1)).first() is not None:
+        if session.exec(select(Bank).limit(1)).first() is None:
+            snapshot = self._read_snapshot()
+            if not snapshot:
+                logger.warning(
+                    "banks table is empty and no snapshot is available; "
+                    "run a refresh before accepting bank names"
+                )
+            else:
+                now = datetime.now()
+                seen: set[tuple[str, str, str]] = set()
+                for info in snapshot:
+                    key = (info.country, info.code, info.name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    session.add(self._to_row(info, now))
+                session.commit()
+                logger.info(
+                    "banks table seeded from snapshot (%d rows)", len(seen)
+                )
+
+        self._ensure_test_banks(session)
+
+    def _ensure_test_banks(self, session: Session) -> None:
+        """Make the provider's test-only banks resolvable outside production.
+
+        Without this a test-mode run cannot use code `001`, because the
+        directory only knows the live `GET /bank` list - so bills using
+        001 are rejected as "not a recognised bank" before they ever
+        reach the provider. Production stays clean.
+        """
+        from app.core.config import settings
+
+        if settings.environment.strip().lower() in ("production", "prod"):
             return
 
-        snapshot = self._read_snapshot()
-        if not snapshot:
-            logger.warning(
-                "banks table is empty and no snapshot is available; "
-                "run a refresh before accepting bank names"
-            )
-            return
-
-        now = datetime.now()
-        seen: set[tuple[str, str, str]] = set()
-        for info in snapshot:
-            key = (info.country, info.code, info.name)
-            if key in seen:
+        added = 0
+        for info in _TEST_BANKS:
+            exists = session.exec(
+                select(Bank).where(Bank.code == info.code).limit(1)
+            ).first()
+            if exists is not None:
                 continue
-            seen.add(key)
-            session.add(self._to_row(info, now))
-        session.commit()
-        logger.info("banks table seeded from snapshot (%d rows)", len(seen))
+            session.add(self._to_row(info, datetime.now()))
+            added += 1
+        if added:
+            session.commit()
+            logger.info("banks table seeded %d test-only bank(s)", added)
 
     @staticmethod
     def _to_row(info: BankInfo, synced_at: datetime) -> Bank:

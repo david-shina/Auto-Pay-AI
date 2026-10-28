@@ -30,8 +30,10 @@ BackgroundScheduler (job runs on a thread) and AsyncIOScheduler
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import logging
+from datetime import timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -92,6 +94,17 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(hours=24),
         id="refresh_banks",
         name="Refresh the local bank directory from the provider",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    _scheduler.add_job(
+        _run_sync_in_private_loop(
+            "reconcile_processing_transfers", _reconcile_processing_transfers
+        ),
+        trigger=IntervalTrigger(minutes=5),
+        id="reconcile_processing_transfers",
+        name="Settle payouts stuck in processing",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
@@ -180,6 +193,165 @@ async def _refresh_banks() -> None:
         count = await directory.refresh(session)
 
     logger.info("scheduler.refresh_banks.count=%d", count)
+
+
+# ── Transfer reconciliation ─────────────────────────────────────────
+# A payout is committed as `processing` and only becomes terminal when
+# the provider says so. The webhook usually does that, but it cannot be
+# the only path: it can be lost, it can race the commit that creates the
+# debit (the row is not visible to the webhook's session yet), and a
+# transfer parked for OTP approval produces no webhook at all until it
+# is finalized. This job settles from the provider instead.
+
+_RECONCILE_MIN_AGE = timedelta(minutes=5)   # let the webhook have a go first
+_OTP_TTL = timedelta(minutes=15)            # unfinalized OTP -> refund
+_PENDING_ALERT_AGE = timedelta(minutes=60)  # still pending -> log loudly
+
+
+def _age_of(when) -> timedelta:
+    """Age of a timestamp that may be tz-aware or naive.
+
+    `created_at` is a TIMESTAMPTZ column, so a value read back is
+    tz-aware, while `datetime.now()` is naive - subtracting them raises
+    TypeError. Match the value's tzinfo when it has one.
+    """
+    from datetime import datetime
+
+    tzinfo = getattr(when, "tzinfo", None)
+    now = datetime.now(tzinfo) if tzinfo is not None else datetime.now()
+    return now - when
+
+
+async def _reconcile_one_transfer(
+    txn_id: int,
+    reference: str,
+    transfer_code: str | None,
+    created_at,
+) -> None:
+    from datetime import datetime
+
+    from app.core.database import session_scope
+    from app.models.enums import TransactionStatus
+    from app.models.transaction import Transaction
+    from app.services import payments as _payments_module
+    from app.services.payout import confirm_payout
+
+    if not reference:
+        return
+
+    provider = _payments_module.get_payment_provider()
+    try:
+        result = await provider.get_transfer(reference=reference)
+    finally:
+        aclose = getattr(provider, "aclose", None)
+        if aclose is not None:
+            with contextlib.suppress(Exception):
+                await aclose()
+
+    with session_scope() as session:
+        txn = session.get(Transaction, txn_id)
+        # Re-check under the session: the webhook may have settled it
+        # while we were on the network call.
+        if txn is None or txn.status != TransactionStatus.PROCESSING.value:
+            return
+
+        age = _age_of(created_at)
+
+        if result.status == "success":
+            confirm_payout(session, provider_reference=reference, success=True)
+            session.commit()
+            record_scheduler_job(job_id="reconcile_transfers", result="success")
+            logger.info("reconcile.transfer.settled_paid reference=%s", reference)
+            return
+
+        if result.status in ("failed", "reversed"):
+            confirm_payout(
+                session,
+                provider_reference=reference,
+                success=False,
+                failure_reason=f"reconcile_{result.status}",
+            )
+            session.commit()
+            record_scheduler_job(job_id="reconcile_transfers", result="failed")
+            logger.info(
+                "reconcile.transfer.settled_failed reference=%s status=%s",
+                reference, result.status,
+            )
+            return
+
+        # Still not terminal. An OTP-parked transfer that nobody approved
+        # would otherwise hold the user's money forever.
+        if transfer_code and age >= _OTP_TTL:
+            confirm_payout(
+                session,
+                provider_reference=reference,
+                success=False,
+                failure_reason="otp_expired",
+            )
+            session.commit()
+            record_scheduler_job(job_id="reconcile_transfers", result="otp_expired")
+            logger.warning(
+                "reconcile.transfer.otp_expired reference=%s age=%s", reference, age,
+            )
+            return
+
+        if age >= _PENDING_ALERT_AGE:
+            logger.warning(
+                "reconcile.transfer.still_pending reference=%s age=%s status=%s",
+                reference, age, result.status,
+            )
+            record_scheduler_job(job_id="reconcile_transfers", result="pending")
+
+
+async def _reconcile_processing_transfers() -> None:
+    """Settle debits stuck in `processing` by asking the provider.
+
+    Covers lost webhooks, the webhook/commit race, and transfers parked
+    for OTP approval that were never finalized.
+    """
+    from datetime import datetime
+
+    from sqlalchemy import select as _sa_select
+
+    from app.core.database import session_scope
+    from app.models.enums import TransactionStatus, TransactionType
+    from app.models.transaction import Transaction
+
+    cutoff = datetime.now() - _RECONCILE_MIN_AGE
+
+    with session_scope() as session:
+        rows = session.exec(
+            _sa_select(Transaction)
+            .where(
+                Transaction.type == TransactionType.DEBIT.value,
+                Transaction.status == TransactionStatus.PROCESSING.value,
+                Transaction.created_at <= cutoff,
+            )
+            .order_by(Transaction.created_at.asc())
+            .limit(50)
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
+        targets = [
+            (t.id, t.provider_reference, t.provider_transfer_code, t.created_at)
+            for t in rows
+        ]
+        # Committing releases the row locks; each target is re-read and
+        # re-checked inside its own session before anything is written.
+        session.commit()
+
+    if not targets:
+        return
+
+    logger.info("scheduler.reconcile_processing_transfers.count=%d", len(targets))
+    for txn_id, reference, transfer_code, created_at in targets:
+        try:
+            await _reconcile_one_transfer(
+                txn_id, reference or "", transfer_code, created_at
+            )
+        except Exception as exc:
+            logger.exception(
+                "reconcile.transfer.error txn_id=%s err=%s", txn_id, exc
+            )
 
 
 def _claim_due_scheduled_bill_ids(session) -> list[int]:
