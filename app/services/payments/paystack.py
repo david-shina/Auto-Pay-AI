@@ -18,6 +18,7 @@ import httpx
 
 from app.core.config import get_settings
 from app.services.payments.base import (
+    BankInfo,
     PaymentProvider,
     ResolvedAccount,
     TopupInit,
@@ -81,6 +82,15 @@ def _map_paystack_error(status_code: int, body: dict) -> PaymentError:
     if "KYC" in message or "BVN" in message or "identity" in message.lower():
         return KYCRequiredError(message, provider="paystack", raw=raw)
 
+    # Bank-code problems are the user's to fix (wrong or unknown bank),
+    # so they must surface as a 422 rather than a retryable 502. Paystack
+    # phrases these as "Unknown bank code", "Invalid bank code", or
+    # "Could not find bank". Before this branch existed they fell through
+    # to `ProviderError`, and the bot printed the raw text to the user -
+    # which is where the "Unknown bank code" report came from.
+    if "bank code" in message.lower() or "find bank" in message.lower():
+        return InvalidAccountError(message, provider="paystack", raw=raw)
+
     if "resolve" in message.lower() or "invalid account" in message.lower():
         return InvalidAccountError(message, provider="paystack", raw=raw)
 
@@ -130,11 +140,16 @@ class PaystackProvider(PaymentProvider):
         *,
         json_body: dict | None = None,
         params: dict | None = None,
-    ) -> dict:
+        return_full: bool = False,
+    ) -> dict | list:
         """Make a Paystack call and return the `data` payload.
 
         Raises a typed `PaymentError` subclass on any non-2xx response.
         Raises `ProviderError` on transport failures.
+
+        `return_full=True` returns the whole envelope instead of just
+        `data`, which the cursor-paginated list endpoints need so the
+        caller can read `meta.next`.
         """
         if not self._secret_key:
             raise AuthenticationError(
@@ -160,6 +175,8 @@ class PaystackProvider(PaymentProvider):
         if not body.get("status", False):
             raise _map_paystack_error(resp.status_code, body)
 
+        if return_full:
+            return body
         return body.get("data") or {}
 
     # ── Customer + DVA ──────────────────────────────────────────────
@@ -204,6 +221,57 @@ class PaystackProvider(PaymentProvider):
             provider_reference=str(data["id"]),  # dedicated_account_id
             provider=self.name,
         )
+
+    # ── Bank directory ──────────────────────────────────────────────
+
+    async def list_banks(self, *, country: str = "nigeria") -> list[BankInfo]:
+        """Fetch every supported bank via `GET /bank`.
+
+        Paystack's bank endpoint has no name-search parameter, so we
+        pull the whole list (cursor-paginated, 100 per page) and match
+        locally. The list is ~500 rows and changes rarely.
+        """
+        banks: list[BankInfo] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {
+                "country": country,
+                "perPage": 100,
+                "use_cursor": "true",
+            }
+            if cursor:
+                params["next"] = cursor
+
+            body = await self._request(
+                "GET", "/bank", params=params, return_full=True
+            )
+            if not isinstance(body, dict):
+                break
+
+            for row in body.get("data") or []:
+                code = str(row.get("code") or "").strip()
+                name = str(row.get("name") or "").strip()
+                if not code or not name:
+                    continue
+                slug = row.get("slug")
+                bank_type = row.get("type")
+                banks.append(
+                    BankInfo(
+                        code=code,
+                        name=name,
+                        slug=str(slug).strip() or None if slug else None,
+                        type=str(bank_type).strip() or None if bank_type else None,
+                        country=str(row.get("country") or country).lower(),
+                        active=bool(row.get("active", True))
+                        and not bool(row.get("is_deleted", False)),
+                    )
+                )
+
+            cursor = (body.get("meta") or {}).get("next")
+            if not cursor:
+                break
+
+        return banks
 
     # ── Account resolution + transfers ──────────────────────────────
 

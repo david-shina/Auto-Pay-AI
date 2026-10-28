@@ -63,6 +63,12 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 exclude = ["tests*", "migrations*", "scripts*"]
 
+# The committed bank snapshot is read at runtime to bootstrap an empty
+# `banks` table, so it must be shipped with the package (a plain
+# non-editable install would otherwise omit it).
+[tool.setuptools.package-data]
+"app.services" = ["data/*.json"]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 asyncio_mode = "auto"

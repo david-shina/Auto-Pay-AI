@@ -1,4 +1,4 @@
-.PHONY: help up up-d down logs logs-app logs-db psql shell restart build rebuild test test-unit test-integration lint format typecheck migrate migrate-new migrate-down seed clean nuke db-create db-init db-reset db-shell cov cov-html cov-clear keygen webhooks
+.PHONY: help up up-d down logs logs-app logs-db psql shell restart build rebuild test test-unit test-integration lint format typecheck migrate migrate-new migrate-down seed clean nuke db-create db-init db-reset db-shell cov cov-html cov-clear keygen webhooks refresh-banks backfill-banks
 
 # ─── Defaults ───────────────────────────────────────────────────────
 COMPOSE         := docker compose
@@ -106,6 +106,12 @@ migrate-down:  ## Roll back one migration
 # ─── Seed / data ────────────────────────────────────────────────────
 seed:  ## Load dev seed data
 	$(COMPOSE) run --rm $(APP_SERVICE) python -m scripts.seed
+
+refresh-banks:  ## Pull GET /bank into the DB and rewrite the committed snapshot
+	$(COMPOSE) run --rm $(APP_SERVICE) python -m scripts.refresh_banks
+
+backfill-banks:  ## Report bills whose bank_code holds a name instead of a code
+	$(COMPOSE) run --rm $(APP_SERVICE) python -m scripts.backfill_bank_codes
 
 # ─── Local DB helpers (run uvicorn outside Docker) ─────────────────
 # These talk to the PostgreSQL instance on PGHOST. Put the password in

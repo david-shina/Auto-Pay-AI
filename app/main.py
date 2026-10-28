@@ -15,7 +15,14 @@ from app import (
     __version__,
     models,  # noqa: F401
 )
-from app.api import auth_router, bills_router, kyc_router, wallet_router, webhooks_router
+from app.api import (
+    auth_router,
+    banks_router,
+    bills_router,
+    kyc_router,
+    wallet_router,
+    webhooks_router,
+)
 from app.api.health import router as health_router
 from app.core.config import settings
 from app.core.logging import setup_logging
@@ -145,6 +152,7 @@ app.include_router(health_router)
 
 # Versioned API
 app.include_router(auth_router,    prefix="/api/v1/auth")
+app.include_router(banks_router,   prefix="/api/v1/banks")
 app.include_router(bills_router,   prefix="/api/v1/bills")
 app.include_router(kyc_router,     prefix="/api/v1/kyc")
 app.include_router(wallet_router,  prefix="/api/v1/wallet")

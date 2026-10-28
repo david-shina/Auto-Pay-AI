@@ -4,6 +4,7 @@ Importing this package registers every model on `SQLModel.metadata`,
 which is what Alembic autogenerate + `init_db()` use.
 """
 from app.models.audit_log import AuditLog
+from app.models.bank import Bank
 from app.models.bill import Bill
 from app.models.enums import AuditEntityType
 from app.models.kyc import KycRecord
@@ -17,6 +18,7 @@ from app.models.webhook_event import WebhookEvent
 __all__ = [
     "AuditEntityType",
     "AuditLog",
+    "Bank",
     "Bill",
     "KycRecord",
     "RefreshToken",

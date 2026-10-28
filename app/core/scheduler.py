@@ -86,6 +86,15 @@ def start_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+    _scheduler.add_job(
+        _run_sync_in_private_loop("refresh_banks", _refresh_banks),
+        trigger=IntervalTrigger(hours=24),
+        id="refresh_banks",
+        name="Refresh the local bank directory from the provider",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     try:
         _scheduler.start()
         logger.info("Scheduler started: %s", [j.id for j in _scheduler.get_jobs()])
@@ -137,6 +146,23 @@ def _run_sync_in_private_loop(job_id: str, fn):
             logger.exception("Scheduler job %s raised", job_id)
 
     return wrapper
+
+
+async def _refresh_banks() -> None:
+    """Pull the provider's supported-bank list into the local cache.
+
+    A daily refresh keeps the directory current as Paystack adds and
+    retires institutions. The committed JSON snapshot covers the window
+    before the first run (and any cold deploy with no network).
+    """
+    from app.core.database import session_scope
+    from app.services.banks import get_bank_directory
+
+    with session_scope() as session:
+        directory = get_bank_directory()
+        count = await directory.refresh(session)
+
+    logger.info("scheduler.refresh_banks.count=%d", count)
 
 
 def _claim_due_scheduled_bill_ids(session) -> list[int]:

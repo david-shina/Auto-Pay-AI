@@ -47,6 +47,24 @@ class ResolvedAccount:
 
 
 @dataclass(frozen=True)
+class BankInfo:
+    """One row of the provider's supported-bank list (`GET /bank`).
+
+    `code` is the value every transfer call expects. The rest is for
+    display and name matching: `name` is the human label, `slug` is
+    the URL-safe form (useful when an LLM or a link produced the
+    string we are trying to match).
+    """
+
+    code: str
+    name: str
+    slug: str | None = None
+    type: str | None = None
+    country: str = "nigeria"
+    active: bool = True
+
+
+@dataclass(frozen=True)
 class TransferResult:
     """The provider's response when we initiated a transfer (payout)."""
 
@@ -167,6 +185,16 @@ class PaymentProvider(Protocol):
         """Issue a dedicated virtual account for `customer_code`."""
         ...
 
+    async def list_banks(self, *, country: str = "nigeria") -> list[BankInfo]:
+        """Return the provider's supported banks for `country`.
+
+        Used to build the local `banks` directory so a user can supply
+        a bank *name* and we can resolve it to the numeric `code` every
+        transfer call requires. Implementations should follow cursor
+        pagination and return the full list, not one page.
+        """
+        ...
+
     async def resolve_account(
         self,
         *,
@@ -175,7 +203,6 @@ class PaymentProvider(Protocol):
     ) -> ResolvedAccount:
         """Look up the name on `account_number` at `bank_code`."""
         ...
-
     async def create_transfer_recipient(
         self,
         *,

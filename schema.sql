@@ -247,6 +247,37 @@ CREATE INDEX IF NOT EXISTS idx_webhook_events_received_at
     ON webhook_events(received_at);
 
 -- =====================================================================
+-- banks
+-- =====================================================================
+-- Local cache of the provider's supported banks, populated from
+-- Paystack `GET /bank` (see app/services/banks.py + the refresh_banks
+-- scheduler job). It exists so a bank *name* typed by a user can be
+-- resolved to the numeric *code* every transfer call requires, without
+-- an API round-trip and without guessing.
+--
+-- Two data quirks, both observed against the live endpoint:
+--   * `code` is not unique - 6 codes are shared by two institutions
+--     (e.g. "100025" is both Kolomoni MFB and KongaPay), hence the
+--     surrogate id + UNIQUE (country, code, name).
+--   * `code` is not always numeric - values like "C08" and "MFB50094"
+--     exist, so the column is TEXT and must not be cast.
+CREATE TABLE IF NOT EXISTS banks (
+    id          BIGSERIAL    PRIMARY KEY,
+    code        VARCHAR(16)  NOT NULL,
+    name        VARCHAR(128) NOT NULL,
+    slug        VARCHAR(128),
+    type        VARCHAR(32),
+    country     VARCHAR(32)  NOT NULL DEFAULT 'nigeria',
+    active      BOOLEAN      NOT NULL DEFAULT TRUE,
+    synced_at   TIMESTAMP    NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_banks_country_code_name UNIQUE (country, code, name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_banks_code    ON banks(code);
+CREATE INDEX IF NOT EXISTS idx_banks_name    ON banks(name);
+CREATE INDEX IF NOT EXISTS idx_banks_country ON banks(country);
+
+-- =====================================================================
 -- ── Showcase queries (documentation only) ──────────────────────────
 -- =====================================================================
 --
