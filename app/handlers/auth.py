@@ -368,7 +368,68 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/schedule — set up a future-dated or recurring bill\n"
         "/bills — list recent bills\n"
         "/transactions — show recent credits and debits\n"
+        "/otp `<code>` — approve a transfer Paystack is holding for OTP\n"
         "/cancel — cancel the current conversation\n\n"
         "Just send a bill photo, PDF, or text to pay a bill."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+# ── /otp ────────────────────────────────────────────────────────────
+
+async def otp_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Complete a transfer that Paystack is holding for OTP approval.
+
+    Paystack sends transfer OTPs to the *merchant's* registered
+    phone/email, so this is an operator action: whoever runs the bot
+    enters the code it received.
+    """
+    chat_id = str(update.effective_chat.id)
+    user = get_linked_user(chat_id)
+    if user is None:
+        await update.message.reply_text(
+            "🔒 Link your account first with `/link YOUR_CODE`",
+            parse_mode="Markdown",
+        )
+        return
+
+    args = context.args or []
+    if not args:
+        await update.message.reply_text(
+            "Send the OTP like this: `/otp 123456`",
+            parse_mode="Markdown",
+        )
+        return
+
+    otp = args[0].strip()
+
+    # Imported lazily: `services.payout` pulls in the provider stack and
+    # `services.telegram` imports this module at load time.
+    from app.services.payments import get_payment_provider
+    from app.services.payout import finalize_pending_transfer
+
+    provider = get_payment_provider()
+    try:
+        with session_scope() as session:
+            result = await finalize_pending_transfer(
+                session, user=user, otp=otp, provider=provider
+            )
+    except Exception as exc:
+        detail = getattr(exc, "detail", None) or str(exc)
+        await update.message.reply_text(
+            f"❌ Could not complete the transfer\n\n{escape_md(str(detail))}",
+            parse_mode="Markdown",
+        )
+        return
+
+    if result.success:
+        await update.message.reply_text(
+            f"✅ *Transfer approved*\n\nReference: `{result.reference}`\n"
+            f"Balance: ₦{float(result.new_balance):,.2f}",
+            parse_mode="Markdown",
+        )
+    else:
+        await update.message.reply_text(
+            f"❌ *Transfer failed*\n\n{escape_md(result.message)}",
+            parse_mode="Markdown",
+        )

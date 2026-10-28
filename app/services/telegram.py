@@ -41,6 +41,7 @@ from app.handlers.auth import (
     bills_command,
     help_command,
     link_command,
+    otp_command,
     start_command,
     transactions_command,
     unlink_command,
@@ -93,6 +94,7 @@ def build_application(token: str) -> Application:
     app.add_handler(CommandHandler("wallet", wallet_command))
     app.add_handler(CommandHandler("bills", bills_command))
     app.add_handler(CommandHandler("transactions", transactions_command))
+    app.add_handler(CommandHandler("otp", otp_command))
 
     # Last-resort error handler — logs but does not crash the bot.
     async def _on_error(update: object, context: CallbackContext) -> None:

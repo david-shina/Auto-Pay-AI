@@ -32,6 +32,7 @@ from app.schemas.bill import (
     BillBankUpdateRequest,
     BillCreateRequest,
     BillResponse,
+    TransferOtpRequest,
 )
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
@@ -39,7 +40,7 @@ from app.services.banks import get_bank_directory
 from app.services.date_parser import parse_bill_due_date
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
-from app.services.payout import execute_payout
+from app.services.payout import execute_payout, finalize_pending_transfer
 
 logger = logging.getLogger(__name__)
 
@@ -377,7 +378,48 @@ async def pay_bill(
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
         message=result.message,
-        decision=Decision.PAY_NOW.value,
+        decision=(
+            "otp_required" if result.requires_otp else Decision.PAY_NOW.value
+        ),
+        decision_reason=(
+            "The transfer needs OTP approval. POST the OTP to "
+            "/api/v1/bills/{id}/transfer-otp to finish it."
+            if result.requires_otp
+            else None
+        ),
+    )
+
+
+# ── POST /bills/{id}/transfer-otp ───────────────────────────────────
+
+@router.post("/{bill_id}/transfer-otp", response_model=BillActionResponse)
+async def submit_transfer_otp(
+    bill_id: int,
+    payload: TransferOtpRequest,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_active_user),
+    provider: PaymentProvider = Depends(get_payment_provider),
+) -> BillActionResponse:
+    """Finish a transfer the provider is holding for OTP approval.
+
+    Paystack sends the OTP to the merchant's registered phone/email, so
+    this is an operator action. Scoped to the bill's owner.
+    """
+    bill = session.get(Bill, bill_id)
+    if bill is None or bill.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Bill not found")
+
+    result = await finalize_pending_transfer(
+        session,
+        user=user,
+        otp=payload.otp,
+        provider=provider,
+        bill_id=bill.id,
+    )
+    session.refresh(bill)
+    return BillActionResponse(
+        bill=BillResponse.model_validate(bill),
+        message=result.message,
     )
 
 

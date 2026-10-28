@@ -59,6 +59,12 @@ class BillBankUpdateRequest(BaseModel):
     bank_name: str | None = Field(default=None, max_length=128)
 
 
+class TransferOtpRequest(BaseModel):
+    """OTP to finish a transfer the provider parked awaiting approval."""
+
+    otp: str = Field(min_length=4, max_length=12)
+
+
 class BillResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

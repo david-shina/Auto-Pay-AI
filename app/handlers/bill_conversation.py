@@ -725,8 +725,12 @@ async def handle_final_confirm(
             session.commit()
     except Exception as exc:
         logger.warning("payout failed for bill %d: %s", bill_id, exc)
+        # `str(HTTPException)` is just "422: Unprocessable Entity" - the
+        # useful text is in `.detail`.
+        reason = getattr(exc, "detail", None) or str(exc)
         await safe_edit(query, 
-            f"❌ *Payment Failed*\n\nReason: {exc}\n\nPlease try again or top up your wallet.",
+            f"❌ *Payment Failed*\n\nReason: {escape_md(str(reason))}\n\n"
+            f"Please try again or top up your wallet.",
             parse_mode="Markdown",
         )
         context.user_data.clear()
@@ -734,11 +738,26 @@ async def handle_final_confirm(
 
     fee = Decimal(str(settings.payout_fee_ngn))
     total = Decimal(str(bill_data.get("amount", 0))) + fee
+
+    if result.requires_otp:
+        await safe_edit(query, 
+            f"🔐 *Transfer needs an OTP*\n\n"
+            f"₦{float(bill_data.get('amount', 0)):,.2f} → "
+            f"*{escape_md(bill_data.get('vendor_name', ''))}*\n"
+            f"Reference: `{result.reference}`\n"
+            f"Remaining balance: ₦{float(user_balance - total):,.2f}\n\n"
+            f"Paystack is holding this transfer for approval. Send the OTP "
+            f"you received with:\n`/otp <code>`",
+            parse_mode="Markdown",
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
     await safe_edit(query, 
         f"✅ *Payment Initiated*\n\n"
         f"₦{float(bill_data.get('amount', 0)):,.2f} → "
         f"*{escape_md(bill_data.get('vendor_name', ''))}*\n"
-        f"Reference: `{result.message}`\n"
+        f"Reference: `{result.reference}`\n"
         f"Remaining balance: ₦{float(user_balance - total):,.2f}\n\n"
         f"You'll get a notification when the transfer completes.",
         parse_mode="Markdown",
