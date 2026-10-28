@@ -228,8 +228,6 @@ async def _reconcile_one_transfer(
     transfer_code: str | None,
     created_at,
 ) -> None:
-    from datetime import datetime
-
     from app.core.database import session_scope
     from app.models.enums import TransactionStatus
     from app.models.transaction import Transaction
