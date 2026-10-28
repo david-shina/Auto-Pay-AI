@@ -48,6 +48,15 @@ class _StubProvider:
         self.calls.append(("create_transfer_recipient", kwargs))
         return "RCP_test"
 
+    async def list_banks(self, **kwargs):
+        from app.services.payments.base import BankInfo
+
+        self.calls.append(("list_banks", kwargs))
+        return [
+            BankInfo(code="058", name="Guaranty Trust Bank", type="nuban"),
+            BankInfo(code="044", name="Access Bank", type="nuban"),
+        ]
+
     async def initiate_transfer(self, **kwargs):
         from app.services.payments.base import TransferResult
         self.calls.append(("initiate_transfer", kwargs))

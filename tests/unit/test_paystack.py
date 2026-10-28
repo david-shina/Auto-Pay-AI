@@ -274,3 +274,106 @@ async def test_kyc_required_error_mapping() -> None:
         await p.initiate_transfer(
             amount_kobo=100, recipient_code="R", reference="r", reason="x"
         )
+
+
+# ── list_banks ─────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_list_banks_follows_cursor_pagination() -> None:
+    route = respx.get(f"{PAYSTACK}/bank").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "status": True,
+                    "data": [
+                        {
+                            "code": "058",
+                            "name": "Guaranty Trust Bank",
+                            "slug": "guaranty-trust-bank",
+                            "type": "nuban",
+                            "country": "Nigeria",
+                            "active": True,
+                        },
+                        {
+                            "code": "C08",
+                            "name": "VTNetworks",
+                            "slug": "vtnetworks-ng",
+                            "type": "nuban",
+                            "country": "Nigeria",
+                            "active": True,
+                        },
+                    ],
+                    "meta": {"next": "cursor-2"},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "status": True,
+                    "data": [
+                        {
+                            "code": "044",
+                            "name": "Access Bank",
+                            "slug": "access-bank",
+                            "type": "nuban",
+                            "country": "Nigeria",
+                            "active": True,
+                        },
+                        {
+                            "code": "999",
+                            "name": "Delisted Bank",
+                            "slug": "delisted",
+                            "type": "nuban",
+                            "country": "Nigeria",
+                            "active": False,
+                            "is_deleted": True,
+                        },
+                    ],
+                    "meta": {"next": None},
+                },
+            ),
+        ]
+    )
+
+    p = _client()
+    banks = await p.list_banks()
+
+    assert [b.code for b in banks] == ["058", "C08", "044", "999"]
+    # Alphanumeric codes must survive untouched.
+    assert banks[1].code == "C08"
+    # `is_deleted` marks the row inactive even when `active` is absent.
+    assert banks[3].active is False
+
+    assert route.call_count == 2
+    assert route.calls[0].request.url.params["use_cursor"] == "true"
+    assert route.calls[0].request.url.params["perPage"] == "100"
+    assert route.calls[1].request.url.params["next"] == "cursor-2"
+
+
+# ── bank-code error mapping ────────────────────────────────────────
+
+@pytest.mark.parametrize(
+    "message",
+    ["Unknown bank code", "Invalid bank code", "Could not find bank"],
+)
+def test_bank_code_errors_are_user_fixable(message: str) -> None:
+    """A bad bank code must be a 422, not a retryable 502.
+
+    Regression: these fell through to `ProviderError`, so the bot
+    printed the raw provider text ("Unknown bank code") to the user and
+    the API told them to retry - which could never help.
+    """
+    from app.services.payments.paystack import _map_paystack_error
+
+    exc = _map_paystack_error(400, {"message": message, "data": None})
+    assert isinstance(exc, InvalidAccountError)
+
+
+def test_generic_provider_error_stays_retryable() -> None:
+    from app.services.payments.paystack import _map_paystack_error
+
+    exc = _map_paystack_error(500, {"message": "Internal server error", "data": None})
+    assert isinstance(exc, ProviderError)
+    assert not isinstance(exc, InvalidAccountError)

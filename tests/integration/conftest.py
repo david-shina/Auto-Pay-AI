@@ -256,6 +256,31 @@ class _StubPaystack:
         self.calls.append(("create_transfer_recipient", kwargs))
         return "RCP_test"
 
+    async def list_banks(self, **kwargs):
+        """Small fixed bank list so directory tests never hit the network.
+
+        Mirrors the shape of `GET /bank`. Codes are real so tests can
+        assert "058 resolves to Guaranty Trust Bank".
+        """
+        from app.services.payments.base import BankInfo
+
+        self.calls.append(("list_banks", kwargs))
+        return [
+            BankInfo(
+                code="058",
+                name="Guaranty Trust Bank",
+                slug="guaranty-trust-bank",
+                type="nuban",
+            ),
+            BankInfo(
+                code="044", name="Access Bank", slug="access-bank", type="nuban"
+            ),
+            BankInfo(
+                code="057", name="Zenith Bank", slug="zenith-bank", type="nuban"
+            ),
+            BankInfo(code="033", name="United Bank For Africa", type="nuban"),
+        ]
+
     async def initiate_transfer(self, **kwargs):
         self.calls.append(("initiate_transfer", kwargs))
         from app.services.payments.base import TransferResult

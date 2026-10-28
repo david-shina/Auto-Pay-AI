@@ -378,18 +378,18 @@ async def test_handle_bank_picked_stores_code() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_bank_typed_validates_digits() -> None:
+async def test_handle_bank_typed_rejects_unknown_name() -> None:
     from app.handlers.schedule_conversation import (
         SCH_BANK,
         handle_bank_typed,
     )
     ctx = _FakeContext()
-    msg = _FakeMessage(chat_id=300010, text="12ab")  # non-digit
+    msg = _FakeMessage(chat_id=300010, text="zzzqqq not a bank")
     update = type("U", (), {"message": msg})()
     result = await handle_bank_typed(update, ctx)
     assert result == SCH_BANK
     body = "\n".join(msg.replies)
-    assert "3" in body and "6" in body
+    assert "couldn't match" in body
 
 
 @pytest.mark.asyncio
