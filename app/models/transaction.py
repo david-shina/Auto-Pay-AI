@@ -84,6 +84,14 @@ class Transaction(SQLModel, table=True):
         default=None,
         sa_column=Column(String(128), nullable=True, index=True),
     )
+    # Paystack `transfer_code` ("TRF_..."). Set only when a transfer was
+    # accepted but parked awaiting OTP approval. A non-null value on a
+    # `processing` debit therefore means "awaiting OTP", which the
+    # reconciliation job uses to decide between waiting and refunding.
+    provider_transfer_code: str | None = Field(
+        default=None,
+        sa_column=Column(String(64), nullable=True, index=True),
+    )
     retry_count: int = Field(default=0, nullable=False)
     failure_reason: str | None = Field(default=None, sa_column=Column(String, nullable=True))
     narration: str | None = Field(default=None, sa_column=Column(String, nullable=True))

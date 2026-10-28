@@ -150,6 +150,9 @@ CREATE TABLE IF NOT EXISTS transactions (
     provider            TEXT            NOT NULL DEFAULT 'paystack',
     provider_reference  TEXT            UNIQUE,
     provider_order_reference  TEXT,
+    -- Paystack transfer_code ("TRF_..."), set when a transfer is parked
+    -- awaiting OTP. Non-null on a processing debit = awaiting OTP.
+    provider_transfer_code    VARCHAR(64),
     retry_count         INTEGER         NOT NULL DEFAULT 0,
     failure_reason      TEXT,
     narration           TEXT,
@@ -165,6 +168,8 @@ CREATE INDEX IF NOT EXISTS idx_transactions_user_status
     ON transactions(user_id, status);
 CREATE INDEX IF NOT EXISTS idx_transactions_created_at
     ON transactions(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_transactions_provider_transfer_code
+    ON transactions(provider_transfer_code);
 CREATE INDEX IF NOT EXISTS idx_transactions_provider_reference
     ON transactions(provider_reference);
 

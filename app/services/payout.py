@@ -63,6 +63,11 @@ class PayoutResult:
     message: str
     reference: str
     new_balance: Decimal
+    # True when the provider accepted the transfer but is holding it for
+    # OTP approval (`status == "otp"`). The wallet has been debited and
+    # the bill is `processing`; the caller must surface this so the
+    # operator can submit the OTP via finalize_pending_transfer().
+    requires_otp: bool = False
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
@@ -293,11 +298,14 @@ async def execute_payout(
         raise
 
     # ── 7. Initiate the transfer ───────────────────────────────────
-    # The provider's response is intentionally discarded: we already
-    # recorded `reference` (our idempotency key) on the debit row, and
-    # the outcome is confirmed asynchronously by the provider webhook.
+    # The provider's response matters for one case: `status == "otp"`.
+    # Paystack then accepted the transfer but is holding it for OTP
+    # approval and the money has NOT moved. We keep going (the wallet is
+    # debited, the bill stays `processing`) but record the
+    # `transfer_code` so the transfer can be finalized, or refunded once
+    # the OTP window expires.
     try:
-        await provider.initiate_transfer(
+        transfer = await provider.initiate_transfer(
             amount_kobo=_ngn_to_kobo(Decimal(str(bill.amount))),
             recipient_code=recipient_code,
             reference=reference,
@@ -322,14 +330,50 @@ async def execute_payout(
         raise
 
     # ── 8. Commit wallet + mark as processing (success) ───────────
+    requires_otp = transfer.status == "otp"
+    if requires_otp and not transfer.transfer_code:
+        # No transfer_code means we could never call finalize_transfer,
+        # so the money would sit debited with no way to release it.
+        # Refund now instead.
+        await _refund_on_failure(
+            session, user, bill, debit,
+            "otp_requested_without_transfer_code", actor=actor,
+        )
+        _commit_or_warn(session)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "The payment provider asked for an OTP but returned no "
+                "transfer code. Please try again."
+            ),
+        )
+
     user.balance = Decimal(str(user.balance)) - total_charge
-    debit.status = TransactionStatus.PROCESSING.value  # remains 'processing' until webhook confirms
+    debit.status = TransactionStatus.PROCESSING.value  # remains 'processing' until webhook/finalize confirms
+    if requires_otp:
+        debit.provider_transfer_code = transfer.transfer_code
     session.add(user)
     session.add(debit)
     session.flush()
 
-    # Note: the bill stays in 'processing' until the webhook arrives
-    # with transfer.success / transfer.failed. That's the next chunk.
+    # Note: the bill stays in 'processing' until the transfer is
+    # confirmed - by the transfer.success/failed webhook, by an explicit
+    # OTP finalize, or by the reconciliation job polling the provider.
+    if requires_otp:
+        logger.info(
+            "payout.otp_required bill_id=%d reference=%s transfer_code=%s",
+            bill.id, reference, transfer.transfer_code,
+        )
+        return PayoutResult(
+            success=True,
+            message=(
+                "Transfer is waiting for OTP approval. Submit the OTP Paystack "
+                "sent you to complete the payment."
+            ),
+            reference=reference,
+            new_balance=Decimal(str(user.balance)),
+            requires_otp=True,
+        )
 
     return PayoutResult(
         success=True,
@@ -441,6 +485,100 @@ def schedule_recurrence(session: Session, *, bill: Bill) -> Bill | None:
 
     record_bill_created(trigger="recurring")
     return next_bill
+
+
+# ── OTP finalization (operator-submitted) ──────────────────────────
+
+async def finalize_pending_transfer(
+    session: Session,
+    *,
+    user: User,
+    otp: str,
+    provider: PaymentProvider,
+    bill_id: int | None = None,
+) -> PayoutResult:
+    """Complete a payout the provider parked awaiting OTP approval.
+
+    Finds the OTP-pending debit (for `bill_id` when given, otherwise the
+    user's most recent one), submits the OTP, then applies a terminal
+    outcome through `confirm_payout` so success/failure bookkeeping and
+    any refund follow exactly the same path as the webhook.
+
+    A rejected OTP does not refund: the operator can retry with a fresh
+    code, and the reconciliation job refunds once the OTP window expires.
+    """
+    # Bind the user to this session: callers (the bot) hand in a User
+    # loaded by a different, already-closed session, so its `balance`
+    # would be stale when we build the result.
+    db_user = session.get(User, user.id) or user
+
+    stmt = select(Transaction).where(
+        Transaction.user_id == db_user.id,
+        Transaction.type == TransactionType.DEBIT.value,
+        Transaction.status == TransactionStatus.PROCESSING.value,
+        Transaction.provider_transfer_code.is_not(None),
+    )
+    if bill_id is not None:
+        stmt = stmt.where(Transaction.bill_id == bill_id)
+    stmt = stmt.order_by(Transaction.created_at.desc()).limit(1).with_for_update()
+
+    txn = session.exec(stmt).first()
+    if txn is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "No transfer is waiting for an OTP"
+                + (f" for bill {bill_id}" if bill_id is not None else "")
+                + "."
+            ),
+        )
+
+    reference = txn.provider_reference or ""
+    try:
+        result = await provider.finalize_transfer(
+            transfer_code=txn.provider_transfer_code or "",
+            otp=otp.strip(),
+        )
+    except PaymentError as exc:
+        logger.warning(
+            "finalize_transfer rejected for reference %s: %s", reference, exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "That OTP was rejected or has expired. Request a new one "
+                "and try again."
+            ),
+        ) from exc
+
+    if result.status in ("pending", "queued", "otp"):
+        # Accepted but not settled yet: stay in processing and let the
+        # webhook or the reconciliation job settle it.
+        session.commit()
+        return PayoutResult(
+            success=True,
+            message="OTP accepted. Transfer is still being processed.",
+            reference=reference,
+            new_balance=Decimal(str(db_user.balance)),
+        )
+
+    outcome = confirm_payout(
+        session,
+        provider_reference=reference,
+        success=result.status == "success",
+        failure_reason=None if result.status == "success" else f"otp_{result.status}",
+    )
+    session.commit()
+    session.refresh(db_user)
+
+    if outcome is None:  # pragma: no cover - txn was found above
+        return PayoutResult(
+            success=False,
+            message="Transfer not found for this reference.",
+            reference=reference,
+            new_balance=Decimal(str(db_user.balance)),
+        )
+    return outcome
 
 
 # ── Webhook-side confirmation (called from webhook handler) ────────

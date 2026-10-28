@@ -66,12 +66,22 @@ class BankInfo:
 
 @dataclass(frozen=True)
 class TransferResult:
-    """The provider's response when we initiated a transfer (payout)."""
+    """The provider's response when we initiated a transfer (payout).
+
+    `status` is the provider's transfer state. Besides the terminal
+    states, `"otp"` means the provider accepted the transfer but is
+    holding it pending an OTP approval (Paystack does this when transfer
+    OTP is enabled on the business). In that case the transfer has NOT
+    been executed and must be completed with `finalize_transfer`.
+    """
 
     provider_reference: str  # our reference that the provider echoed back
     provider_transfer_id: str  # gateway's transfer ID
-    status: str  # "pending" | "success" | "failed" | "reversed"
+    status: str  # "pending" | "success" | "failed" | "reversed" | "otp"
     raw_response: dict = field(default_factory=dict)
+    # Needed to finalize an `otp` transfer (Paystack `transfer_code`,
+    # e.g. "TRF_..." - not the numeric `id`).
+    transfer_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +239,32 @@ class PaymentProvider(Protocol):
         bakes the name into `recipient_code` and ignores it; Nomba's
         one-step flow needs the name in the request body. Default
         empty so Paystack callers don't need to change.
+        """
+        ...
+
+    async def finalize_transfer(
+        self,
+        *,
+        transfer_code: str,
+        otp: str,
+    ) -> TransferResult:
+        """Complete a transfer the provider parked awaiting OTP."""
+        ...
+
+    async def get_transfer(
+        self,
+        *,
+        reference: str,
+    ) -> TransactionStatusResult:
+        """Look up an outgoing transfer by our reference.
+
+        Separate from `get_transaction`: providers expose charges and
+        transfers on different endpoints (Paystack
+        `GET /transaction/verify/{ref}` vs `GET /transfer/verify/{ref}`),
+        and using the wrong one makes every transfer look unknown.
+
+        Returns a `TransactionStatusResult` with `status` normalized to
+        "success" | "pending" | "failed" | "reversed" | "unknown".
         """
         ...
 

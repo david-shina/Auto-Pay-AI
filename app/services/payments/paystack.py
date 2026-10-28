@@ -346,9 +346,79 @@ class PaystackProvider(PaymentProvider):
         )
         return TransferResult(
             provider_reference=str(data.get("reference") or reference),
-            provider_transfer_id=str(data["id"]),
-            status=str(data.get("status") or "pending"),
+            provider_transfer_id=str(data.get("id") or ""),
+            status=str(data.get("status") or "pending").lower(),
             raw_response=data,
+            # Paystack returns `transfer_code` ("TRF_...") when the
+            # transfer is parked awaiting OTP. `finalize_transfer`
+            # needs that, not the numeric `id`.
+            transfer_code=(
+                str(data["transfer_code"]) if data.get("transfer_code") else None
+            ),
+        )
+
+    async def finalize_transfer(
+        self,
+        *,
+        transfer_code: str,
+        otp: str,
+    ) -> TransferResult:
+        """Approve an `otp`-parked transfer with the OTP the merchant received."""
+        data = await self._request(
+            "POST",
+            "/transfer/finalize_transfer",
+            json_body={"transfer_code": transfer_code, "otp": otp},
+        )
+        return TransferResult(
+            provider_reference=str(data.get("reference") or ""),
+            provider_transfer_id=str(data.get("id") or ""),
+            status=str(data.get("status") or "pending").lower(),
+            raw_response=data,
+            transfer_code=str(data.get("transfer_code") or transfer_code),
+        )
+
+    async def get_transfer(
+        self,
+        *,
+        reference: str,
+    ) -> TransactionStatusResult:
+        """Look up an outgoing transfer.
+
+        Transfers have their own verify endpoint; `/transaction/verify`
+        only covers charges and would report every transfer as unknown.
+        """
+        from app.services.payments.base import TransactionStatusResult
+
+        data = await self._request("GET", f"/transfer/verify/{reference}")
+
+        # Transfer-specific statuses. `otp` and `queued` mean the money
+        # has not moved yet, so they are "pending", not terminal.
+        mapping = {
+            "success": "success",
+            "failed": "failed",
+            "reversed": "reversed",
+            "abandoned": "failed",
+            "pending": "pending",
+            "otp": "pending",
+            "queued": "pending",
+            "processing": "pending",
+        }
+        raw_status = str(data.get("status") or "").lower()
+        normalized = mapping.get(raw_status, "unknown")
+
+        amount_kobo: int | None = None
+        raw_amount = data.get("amount")
+        if raw_amount is not None:
+            try:
+                amount_kobo = int(raw_amount)
+            except (TypeError, ValueError):
+                amount_kobo = None
+
+        return TransactionStatusResult(
+            provider_reference=str(data.get("reference") or reference),
+            status=normalized,
+            amount_kobo=amount_kobo,
+            raw=data,
         )
 
     # ── Top-up via Checkout (no DVA required) ─────────────────────
