@@ -260,8 +260,45 @@ async def handle_resolve_account(
     bill_data = context.user_data.get("bill", {})
     user_id = context.user_data.get("user_id")
     account_number = bill_data.get("account_number", "")
-    bank_code = bill_data.get("bank_code", "")
     vendor_name = bill_data.get("vendor_name", "")
+
+    # The bill may carry a bank *name* (from OCR or the LLM) rather than
+    # a code. Resolve it locally first: forwarding a name to Paystack is
+    # what used to produce the raw "Unknown bank code" error.
+    from app.services.banks import get_bank_directory
+
+    with session_scope() as session:
+        directory = get_bank_directory()
+        directory.ensure_loaded(session)
+        bank_code, bank_name = directory.normalize_bank_fields(
+            session,
+            code=bill_data.get("bank_code"),
+            name=bill_data.get("bank_name"),
+        )
+        if bank_code:
+            bill_id = context.user_data.get("bill_id")
+            stored = session.get(Bill, bill_id) if bill_id is not None else None
+            if stored is not None and stored.bank_code != bank_code:
+                stored.bank_code = bank_code
+                stored.bank_name = bank_name
+                session.add(stored)
+                session.commit()
+
+    bill_data["bank_code"] = bank_code or ""
+    if bank_name:
+        bill_data["bank_name"] = bank_name
+    context.user_data["bill"] = bill_data
+
+    if not bank_code:
+        hint = f" ({escape_md(bank_name)})" if bank_name else ""
+        await query.edit_message_text(
+            f"🏦 *Bank not recognised*{hint}\n\n"
+            f"I couldn't match this bill's bank to a supported bank, so I "
+            f"can't verify the account. Pick the bank again, then retry "
+            f"the payment.",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
 
     provider: PaymentProvider = get_payment_provider()
     try:
@@ -270,19 +307,31 @@ async def handle_resolve_account(
             bank_code=bank_code,
         )
     except InvalidAccountError as exc:
+        logger.warning(
+            "account resolution failed (bill=%s bank=%s): %s",
+            context.user_data.get("bill_id"), bank_code, exc,
+        )
         await query.edit_message_text(
-            f"❌ *Account could not be resolved*\n\n"
-            f"`{escape_md(str(exc))}`\n\n"
-            f"The account number / bank code on the bill doesn't "
-            f"match anything at the bank. Edit the bill and try again.",
+            "❌ *Account could not be resolved*\n\n"
+            "The account number and bank on this bill don't match anything "
+            "at the bank. Check the account number and the bank, then try "
+            "again.",
             parse_mode="Markdown",
         )
         _cancel_persisted_bill(context)
         return ConversationHandler.END
     except PaymentError as exc:
+        # Never echo the provider's raw message to the user - it leaks
+        # internals ("Unknown bank code", "Invalid key") and is not
+        # actionable. The detail goes to the log.
+        logger.warning(
+            "bank lookup failed (bill=%s bank=%s): %s",
+            context.user_data.get("bill_id"), bank_code, exc,
+        )
         await query.edit_message_text(
-            f"❌ *Bank lookup failed*\n\n`{escape_md(str(exc))}`\n\n"
-            f"Try again in a moment.",
+            "❌ *Bank lookup failed*\n\n"
+            "The bank couldn't verify this account right now. Please try "
+            "again in a moment.",
             parse_mode="Markdown",
         )
         _cancel_persisted_bill(context)

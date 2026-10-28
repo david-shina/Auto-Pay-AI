@@ -284,7 +284,7 @@ async def handle_account(
     await update.message.reply_text(
         f"✅ Account: `{escape_md(text)}`\n\n"
         f"*Step 4/6 — Bank*\n"
-        f"Pick the bank, or tap *Other* to type the 3-digit bank code.",
+        f"Pick the bank, or tap *Other* to type its name or code.",
         parse_mode="Markdown",
         reply_markup=bank_quick_pick_keyboard(),
     )
@@ -307,53 +307,102 @@ async def handle_bank_picked(
         await query.edit_message_text("⚠️ Bad bank choice. Run /schedule again.")
         return ConversationHandler.END
     _, code, name = parts
+    # Button labels are truncated to fit Telegram's 64-byte
+    # callback_data limit. When the choices came from a name search we
+    # kept the full names in `bank_options`, so prefer those.
+    options = context.user_data["sch"].get("bank_options") or {}
     context.user_data["sch"]["bank_code"] = code
-    context.user_data["sch"]["bank_name"] = name
+    context.user_data["sch"]["bank_name"] = options.get(code, name)
     return await _go_to_date(query, context)
 
 
 async def handle_bank_other(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """User tapped 'Other' — ask them to type a 3-digit code."""
+    """User tapped 'Other' — ask them to type a bank name or code."""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
-        "🔢 *Type the 3-digit bank code*\n\n"
-        "If you don't know it, see "
-        "[Paystack's bank list]"
-        "(https://paystack.com/payment-gateway/banks) — tap a bank to "
-        "see its code.",
+        "🏦 *Type the bank name or code*\n\n"
+        "For example `GTBank`, `Access Bank`, `UBA`, or the numeric code "
+        "`058`. If several banks match, I'll show you the options.",
         parse_mode="Markdown",
     )
     return SCH_BANK  # stay in this state; typed input goes to handle_bank_typed
 
 
+def _bank_choice_keyboard(matches: list) -> InlineKeyboardMarkup:
+    """One button per candidate bank, reusing the quick-pick callback.
+
+    `handle_bank_picked` parses `sch_bank:<code>:<name>`, so the button
+    data is the same shape the preset keyboard uses. The name is
+    truncated to stay inside Telegram's 64-byte callback_data limit.
+    """
+    rows = [
+        [
+            InlineKeyboardButton(
+                f"{m.name[:28]} ({m.code})",
+                callback_data=f"sch_bank:{m.code}:{m.name[:28]}",
+            )
+        ]
+        for m in matches
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
 async def handle_bank_typed(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
-    """User typed a bank code (instead of tapping a quick-pick)."""
+    """User typed a bank name or code instead of tapping a quick-pick.
+
+    Names are resolved against the local bank directory. An unambiguous
+    hit continues straight to the date step; several candidates are
+    offered as buttons (never auto-picked, since a wrong bank code sends
+    real money to the wrong place); no hit asks again.
+    """
     context.user_data.setdefault("sch", {})
     text = (update.message.text or "").strip()
-    if not text.isdigit() or not (3 <= len(text) <= 6):
-        await update.message.reply_text(
-            "⚠️ Bank codes are 3–6 digits. Try again:",
-            parse_mode="Markdown",
-        )
+    if not text:
+        await update.message.reply_text("⚠️ Type a bank name or code:")
         return SCH_BANK
 
-    context.user_data["sch"]["bank_code"] = text
-    # Look up the friendly name from our preset list, fall back to the code.
-    friendly = next(
-        (n for (n, c, _full) in _BANK_PRESETS if c == text),
-        f"Bank {text}",
-    )
-    context.user_data["sch"]["bank_name"] = friendly
+    from app.services.banks import get_bank_directory
+
+    with session_scope() as session:
+        directory = get_bank_directory()
+        directory.ensure_loaded(session)
+        exact = directory.resolve_exact(session, text)
+        matches = directory.resolve_name(session, text)
+
+    if exact is None:
+        if not matches:
+            await update.message.reply_text(
+                f"⚠️ I couldn't match *{escape_md(text)}* to a bank.\n\n"
+                f"Try the full name (e.g. `Guaranty Trust Bank`) or the "
+                f"numeric code. Tap a bank to pick it, or type another name:",
+                parse_mode="Markdown",
+            )
+            return SCH_BANK
+
+        await update.message.reply_text(
+            f"Which bank did you mean by *{escape_md(text)}*?",
+            parse_mode="Markdown",
+            reply_markup=_bank_choice_keyboard(matches),
+        )
+        # Callback data only carries a truncated label; keep the full
+        # names here so the picked bank is stored with its real name.
+        context.user_data["sch"]["bank_options"] = {
+            m.code: m.name for m in matches
+        }
+        return SCH_BANK
+
+    context.user_data["sch"]["bank_code"] = exact.code
+    context.user_data["sch"]["bank_name"] = exact.name
 
     # Send a fresh message + the date keyboard (we're in a typed-text
     # state, not a callback-query state, so we can't edit).
     await update.message.reply_text(
-        f"✅ Bank: *{escape_md(friendly)}* (`{escape_md(text)}`)\n\n"
+        f"✅ Bank: *{escape_md(exact.name)}* (`{escape_md(exact.code)}`)\n\n"
         f"*Step 5/6 — First due date*\n"
         f"When should the first payment happen?",
         parse_mode="Markdown",
@@ -631,7 +680,7 @@ async def handle_back_bank(
     await query.answer()
     await query.edit_message_text(
         "*Step 4/6 — Bank*\n"
-        "Pick the bank, or tap *Other* to type the 3-digit bank code.",
+        "Pick the bank, or tap *Other* to type its name or code.",
         parse_mode="Markdown",
         reply_markup=bank_quick_pick_keyboard(),
     )

@@ -29,11 +29,13 @@ from app.models.enums import BillStatus
 from app.models.user import User
 from app.schemas.bill import (
     BillActionResponse,
+    BillBankUpdateRequest,
     BillCreateRequest,
     BillResponse,
 )
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
+from app.services.banks import get_bank_directory
 from app.services.date_parser import parse_bill_due_date
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
@@ -42,6 +44,63 @@ from app.services.payout import execute_payout
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bills"])
+
+
+def _resolve_bank_or_422(
+    session: Session,
+    *,
+    bank_code: str | None,
+    bank_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Turn a supplied bank code-or-name into `(code, name)`.
+
+    Accepts either a code ("058") or a name ("GTBank"). Raises 422 when
+    the value matches more than one bank, because guessing can send the
+    money to the wrong institution. The message names the top candidates
+    so a non-SPA client can still recover; the SPA resolves through
+    `/api/v1/banks/resolve` and shows a picker before submitting.
+    """
+    raw = (bank_code or "").strip() or (bank_name or "").strip()
+    if not raw:
+        return (None, None)
+
+    directory = get_bank_directory()
+    directory.ensure_loaded(session)
+
+    exact = directory.resolve_exact(session, raw)
+    if exact is not None:
+        return (exact.code, exact.name)
+
+    matches = directory.resolve_name(session, raw)
+    detail = f"{raw!r} is not a recognised bank."
+    if matches:
+        hint = ", ".join(f"{m.name} ({m.code})" for m in matches[:5])
+        detail += f" Did you mean: {hint}?"
+    detail += " Search with GET /api/v1/banks?q= and send the chosen code as bank_code."
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=detail,
+    )
+
+
+def _normalize_bank_best_effort(
+    session: Session,
+    *,
+    bank_code: str | None,
+    bank_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Like `_resolve_bank_or_422` but never raises.
+
+    Used on the upload path, where the bank is often absent or garbled
+    by OCR/LLM extraction. The bill is still created; an unresolvable
+    bank leaves `bank_code=None` so the invalid value can never reach a
+    transfer, and the user is prompted to pick the bank before paying.
+    """
+    directory = get_bank_directory()
+    directory.ensure_loaded(session)
+    return directory.normalize_bank_fields(
+        session, code=bank_code, name=bank_name
+    )
 
 
 # ── POST /bills/upload ──────────────────────────────────────────────
@@ -103,6 +162,9 @@ async def upload_bill(
         )
 
     # 2. Create the bill
+    bank_code, bank_name = _normalize_bank_best_effort(
+        session, bank_code=extracted.bank_code, bank_name=extracted.bank_name
+    )
     bill = Bill(
         user_id=user.id,
         vendor_name=extracted.vendor_name,
@@ -110,8 +172,8 @@ async def upload_bill(
         currency=extracted.currency or "NGN",
         due_date=parse_bill_due_date(extracted.due_date),
         account_number=extracted.account_number,
-        bank_code=extracted.bank_code,
-        bank_name=extracted.bank_name,
+        bank_code=bank_code,
+        bank_name=bank_name,
         status=BillStatus.PENDING.value,
     )
     session.add(bill)
@@ -178,6 +240,9 @@ async def create_bill(
     user: User = Depends(get_current_active_user),
     provider: PaymentProvider = Depends(get_payment_provider),
 ) -> BillActionResponse:
+    bank_code, bank_name = _resolve_bank_or_422(
+        session, bank_code=payload.bank_code, bank_name=payload.bank_name
+    )
     bill = Bill(
         user_id=user.id,
         vendor_name=payload.vendor_name,
@@ -185,8 +250,8 @@ async def create_bill(
         currency="NGN",
         due_date=payload.due_date,
         account_number=payload.account_number,
-        bank_code=payload.bank_code,
-        bank_name=payload.bank_name,
+        bank_code=bank_code,
+        bank_name=bank_name,
         status=BillStatus.PENDING.value,
     )
     session.add(bill)
@@ -207,8 +272,46 @@ async def create_bill(
     )
 
 
-# ── GET /bills ──────────────────────────────────────────────────────
+@router.patch("/{bill_id}", response_model=BillResponse)
+def update_bill_payout_account(
+    bill_id: int,
+    payload: BillBankUpdateRequest,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_active_user),
+) -> BillResponse:
+    """Correct the payout destination (bank / account) on a bill.
 
+    This is the escape hatch for bills created before the bank
+    directory existed, or whose bank came back from OCR as a name we
+    could not resolve. Without it the only fix was to delete and
+    recreate the bill.
+    """
+    bill = session.get(Bill, bill_id)
+    if bill is None or bill.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Bill not found")
+    if bill.status in (BillStatus.PAID.value, BillStatus.PROCESSING.value):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This bill has already been paid or is being paid.",
+        )
+
+    if payload.account_number is not None:
+        bill.account_number = payload.account_number.strip() or None
+
+    if payload.bank_code is not None or payload.bank_name is not None:
+        bank_code, bank_name = _resolve_bank_or_422(
+            session, bank_code=payload.bank_code, bank_name=payload.bank_name
+        )
+        bill.bank_code = bank_code
+        bill.bank_name = bank_name
+
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+    return BillResponse.model_validate(bill)
+
+
+# ── GET /bills ──────────────────────────────────────────────────────
 @router.get("", response_model=list[BillResponse])
 def list_bills(
     status_filter: str | None = None,

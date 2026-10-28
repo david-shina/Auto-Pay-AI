@@ -193,15 +193,29 @@ async def execute_payout(
 
     # ── 6. Resolve account + create transfer recipient ─────────────
     if not bill.account_number or not bill.bank_code:
+        unresolved_bank = bool(bill.bank_name) and not bill.bank_code
         await _refund_on_failure(
             session, user, bill, debit,
-            "missing account_number or bank_code",
+            (
+                f"bank_not_resolved: {bill.bank_name!r}"
+                if unresolved_bank
+                else "missing account_number or bank_code"
+            ),
             actor=actor,
         )
         _commit_or_warn(session)
+        if unresolved_bank:
+            detail = (
+                f"This bill's bank ({bill.bank_name!r}) has not been matched to a "
+                "bank code yet. Choose the bank and update the bill before paying."
+            )
+        elif not bill.account_number:
+            detail = "Bill has no payout account number configured."
+        else:
+            detail = "Bill has no payout account configured."
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="Bill has no payout account configured.",
+            detail=detail,
         )
 
     try:

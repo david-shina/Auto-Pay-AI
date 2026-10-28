@@ -37,7 +37,25 @@ class BillCreateRequest(BaseModel):
     amount: float = Field(gt=0)
     due_date: datetime
     account_number: str | None = Field(default=None, max_length=32)
-    bank_code: str | None = Field(default=None, max_length=16)
+    # Accepts either a provider bank code ("058") or a bank name
+    # ("GTBank", "Guaranty Trust Bank"). The API resolves it to a code
+    # via the local bank directory and stores only the resolved code, so
+    # this field is sized for a name, not for the stored value.
+    bank_code: str | None = Field(default=None, max_length=128)
+    bank_name: str | None = Field(default=None, max_length=128)
+
+
+class BillBankUpdateRequest(BaseModel):
+    """Set or correct the payout destination on an existing bill.
+
+    Used by the SPA when a bill was created with a bank we could not
+    resolve (typically an OCR'd bank name). `bank_code` accepts either a
+    code or a name - the API normalises it through the bank directory
+    and stores only a real code.
+    """
+
+    account_number: str | None = Field(default=None, max_length=32)
+    bank_code: str | None = Field(default=None, max_length=128)
     bank_name: str | None = Field(default=None, max_length=128)
 
 
