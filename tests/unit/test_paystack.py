@@ -95,15 +95,17 @@ async def test_create_virtual_account_parses_response() -> None:
 @pytest.mark.asyncio
 @respx.mock
 async def test_resolve_account() -> None:
+    # Paystack's real response shape: no `bank_code` field. The old
+    # fixture included one, which hid a KeyError on every real call.
     respx.get(f"{PAYSTACK}/bank/resolve").mock(
         return_value=httpx.Response(
             200,
             json={
                 "status": True,
+                "message": "Account number resolved",
                 "data": {
                     "account_number": "0123456789",
                     "account_name": "DSTV NG LTD",
-                    "bank_code": "058",
                 },
             },
         )
@@ -111,7 +113,27 @@ async def test_resolve_account() -> None:
     p = _client()
     out = await p.resolve_account(account_number="0123456789", bank_code="058")
     assert out.account_name == "DSTV NG LTD"
+    assert out.account_number == "0123456789"
+    # The requested code is echoed back, since Paystack omits it.
     assert out.bank_code == "058"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_resolve_account_requires_an_account_name() -> None:
+    respx.get(f"{PAYSTACK}/bank/resolve").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "status": True,
+                "message": "Account number resolved",
+                "data": {"account_number": "0123456789"},
+            },
+        )
+    )
+    p = _client()
+    with pytest.raises(InvalidAccountError):
+        await p.resolve_account(account_number="0123456789", bank_code="058")
 
 
 @pytest.mark.asyncio

@@ -286,10 +286,22 @@ class PaystackProvider(PaymentProvider):
             "/bank/resolve",
             params={"account_number": account_number, "bank_code": bank_code},
         )
+        # Paystack's `/bank/resolve` returns ONLY `account_number` and
+        # `account_name` - it does not echo the bank code back. Reading
+        # `data["bank_code"]` raised KeyError on every real call; the
+        # test fixtures fabricated the field, which is why it survived.
+        account_name = str(data.get("account_name") or "").strip()
+        if not account_name:
+            raise InvalidAccountError(
+                f"Paystack returned no account name for {account_number} "
+                f"at bank {bank_code}",
+                provider="paystack",
+                raw=data,
+            )
         return ResolvedAccount(
-            account_number=str(data["account_number"]),
-            account_name=str(data["account_name"]),
-            bank_code=str(data["bank_code"]),
+            account_number=str(data.get("account_number") or account_number),
+            account_name=account_name,
+            bank_code=str(data.get("bank_code") or bank_code),
         )
 
     async def create_transfer_recipient(
