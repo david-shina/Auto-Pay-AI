@@ -249,3 +249,16 @@ def test_spa_no_console_errors_on_load() -> None:
     )
     assert "OK" in result.stdout
 
+
+
+def test_spa_exposes_pay_now_and_schedule() -> None:
+    """Upload no longer pays by itself, so the UI must offer both actions.
+
+    `billRow()` and the upload result card render these dynamically, so
+    the static-HTML onclick check above does not cover them.
+    """
+    src = JS_PATH.read_text(encoding="utf-8")
+    assert "function scheduleBill" in src
+    assert "API.bills.schedule" in src
+    # Paying is gated on a resolved bank; scheduling is always offered.
+    assert "b.bank_code ?" in src

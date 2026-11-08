@@ -123,6 +123,8 @@ const API = (() => {
       get: (id) => request("GET", `/bills/${id}`),
       create: (d) => request("POST", "/bills", d),
       pay: (id) => request("POST", `/bills/${id}/pay`),
+      // Defer to the due date. Moves no money now, so no confirmation.
+      schedule: (id, d = {}) => request("POST", `/bills/${id}/schedule`, d),
       cancel: (id) => request("POST", `/bills/${id}/cancel`),
       // Set / correct the payee bank. `bank_code` accepts a code or a
       // name; the server resolves it and stores a real code.
@@ -413,6 +415,9 @@ function renderBills() {
 
 async function loadBills(statusFilter = "") {
   const container = document.getElementById("bills-list");
+  // Called from the upload page too (after scheduling), where the table
+  // does not exist.
+  if (!container) return;
   try {
     const bills = await API.bills.list(statusFilter || undefined);
     if (bills.length === 0) {
@@ -429,14 +434,20 @@ function billRow(b) {
   const isPending = b.status === "pending" || b.status === "scheduled" || b.status === "hold";
   const isCancellable = b.status === "pending" || b.status === "scheduled";
   const needsBank = !b.bank_code && isPending;
+  // A bill waiting for the user to choose pay-now vs schedule. Only the
+  // `pending` state is undecided; `scheduled` is already committed.
+  const needsAction = b.status === "pending";
+  const canSchedule = needsAction || b.status === "failed";
   return `<tr>
     <td>${esc(b.vendor_name)}</td>
     <td>${fmtMoney(b.amount)}</td>
     <td>${fmtDate(b.due_date)}</td>
     <td>${statusBadge(b.status)}</td>
     <td class="flex gap-2">
+      ${needsAction ? `<span class="badge badge-hold">needs action</span>` : ""}
       ${needsBank ? `<button class="btn-lime text-xs py-1 px-3" onclick="openBankPicker(${b.id})">Set bank</button>` : ""}
-      ${isPending ? `<button class="btn-lime text-xs py-1 px-3" onclick="payBill(${b.id})">Pay now</button>` : ""}
+      ${isPending && b.bank_code ? `<button class="btn-lime text-xs py-1 px-3" onclick="payBill(${b.id})">Pay now</button>` : ""}
+      ${canSchedule ? `<button class="btn-outline text-xs py-1 px-3" onclick="scheduleBill(${b.id})">Schedule</button>` : ""}
       ${isCancellable ? `<button class="btn-danger text-xs py-1" onclick="cancelBill(${b.id})">Cancel</button>` : ""}
     </td></tr>`;
 }
@@ -552,8 +563,26 @@ async function payBill(id) {
   ]);
 }
 
-async function cancelBill(id) {
-  showModal("Cancel bill", `Are you sure you want to cancel bill #${id}?`, [
+async function scheduleBill(id) {
+  try {
+    const res = await API.bills.schedule(id, {});
+    toast(res.message || "Bill scheduled.", "success");
+
+    // If the upload result card for this bill is on screen, replace its
+    // actions so it cannot be paid by mistake after being scheduled.
+    const actions = document.getElementById(`bill-actions-${id}`);
+    if (actions) {
+      actions.innerHTML =
+        `<span class="badge badge-scheduled">scheduled</span>` +
+        `<span class="text-sm text-mute">${esc(res.message || "")}</span>`;
+    }
+    loadBills();
+  } catch (err) {
+    toast(err.message, "error");
+  }
+}
+
+async function cancelBill(id) {  showModal("Cancel bill", `Are you sure you want to cancel bill #${id}?`, [
     { label: "Keep", cls: "btn-outline" },
     { label: "Cancel bill", cls: "btn-danger", fn: async () => {
       try {
@@ -650,7 +679,7 @@ async function handleUpload() {
         </div>
         ${res.decision ? `
         <div class="card-2 p-4 mt-2">
-          <div class="label mb-1">Agent decision</div>
+          <div class="label mb-1">Recommended</div>
           <div class="flex items-center gap-3">
             ${statusBadge(res.decision)}
             <span class="text-sm text-mute">${esc(res.decision_reason || "")}</span>
@@ -663,6 +692,10 @@ async function handleUpload() {
           <p class="text-sm text-mute mb-3">We couldn't match this bill's bank, so it can't be paid yet.</p>
           <button class="btn-lime text-xs py-1 px-3" onclick="openBankPicker(${b.id})">Set payee bank</button>
         </div>` : ""}
+        <div id="bill-actions-${b.id}" class="flex flex-wrap items-center gap-3 mt-4">
+          ${b.bank_code ? `<button class="btn-lime" onclick="payBill(${b.id})">Pay now</button>` : ""}
+          <button class="btn-outline" onclick="scheduleBill(${b.id})">Schedule for ${fmtDate(b.due_date)}</button>
+        </div>
       </div>`;
     toast(res.message || "Bill uploaded!", "success");
   } catch (err) {
