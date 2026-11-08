@@ -23,7 +23,7 @@ import base64
 import logging
 import re
 from abc import ABC, abstractmethod
-from typing import ClassVar
+from typing import ClassVar, Final, Literal
 
 from app.core.config import settings
 from app.schemas.bill import BillExtractionResult
@@ -65,7 +65,7 @@ def _llm_extract(system: str, user: str) -> BillExtractionResult | None:
         return None
     try:
         result = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="qwen/qwen3.8-27b",
             response_model=BillExtractionResult,
             messages=[
                 {"role": "system", "content": system},
@@ -118,6 +118,120 @@ def _detect_vendor(text: str) -> str:
     return ""
 
 
+# ── Payment-intent inference ────────────────────────────────────────
+#
+# The extractor is asked to fill `intent` / `recurrence_interval`, but
+# relying on a model for the decision that gates whether money moves
+# *now* is a bad trade - a hallucinated "pay_now" costs real money.
+# These keyword passes run on top of the model output and only refine an
+# "ask" into a concrete intent. They never override a concrete answer,
+# except where recurrence makes "pay_now" self-contradictory.
+#
+# Schedule phrases are checked FIRST so "don't pay now" is read as
+# "schedule", not as "pay now".
+
+_PAY_NOW_RE: Final = re.compile(
+    r"\b(?:pay|settle|clear)\b[^.\n]{0,24}\b(?:now|today|immediately|asap|right away)\b",
+    re.IGNORECASE,
+)
+
+_PAY_NOW_PHRASES: tuple[str, ...] = (
+    "right now",
+    "immediately",
+    "asap",
+    "as soon as possible",
+    "urgent",
+)
+
+_SCHEDULE_RE: Final = re.compile(
+    r"\b(?:schedule|defer|postpone)\b|\bremind me\b",
+    re.IGNORECASE,
+)
+
+_SCHEDULE_PHRASES: tuple[str, ...] = (
+    "don't pay",
+    "do not pay",
+    "not yet",
+    "later",
+    "next week",
+    "next month",
+    "next year",
+    "pay on ",
+    "pay next ",
+)
+
+_MONTHLY_PHRASES: tuple[str, ...] = (
+    "every month",
+    "monthly",
+    "each month",
+    "per month",
+)
+
+_WEEKLY_PHRASES: tuple[str, ...] = (
+    "every week",
+    "weekly",
+    "each week",
+    "per week",
+)
+
+
+def _infer_intent(text: str) -> Literal["pay_now", "schedule"] | None:
+    """Read a payment intent out of free text. None when it is unclear.
+
+    Schedule wins over pay-now so "don't pay now" and "pay it later" are
+    not read as instructions to pay.
+    """
+    lowered = (text or "").lower()
+    if not lowered.strip():
+        return None
+    if _SCHEDULE_RE.search(lowered) or any(p in lowered for p in _SCHEDULE_PHRASES):
+        return "schedule"
+    if _PAY_NOW_RE.search(lowered) or any(p in lowered for p in _PAY_NOW_PHRASES):
+        return "pay_now"
+    return None
+
+
+def _infer_recurrence(text: str) -> Literal["weekly", "monthly"] | None:
+    """Read a recurrence out of free text. None when it is not mentioned."""
+    lowered = (text or "").lower()
+    if any(phrase in lowered for phrase in _MONTHLY_PHRASES):
+        return "monthly"
+    if any(phrase in lowered for phrase in _WEEKLY_PHRASES):
+        return "weekly"
+    return None
+
+
+def _apply_intent_fallback(
+    result: BillExtractionResult, text: str
+) -> BillExtractionResult:
+    """Fill in intent/recurrence from keywords when the extractor left them unset.
+
+    `text` is whatever the user actually supplied (typed message, PDF text,
+    OCR output). For an image there is usually no instruction text, so the
+    result stays "ask" and the caller asks the user.
+    """
+    recurrence = result.recurrence_interval or _infer_recurrence(text)
+    intent = result.intent
+
+    if recurrence:
+        # Recurrence is structural, and only exists on a scheduled bill -
+        # so it wins over a model-supplied "pay_now" ("pay now, every
+        # month" becomes a monthly schedule whose first run is immediate
+        # when the due date is today).
+        intent = "schedule"
+    elif intent == "ask":
+        intent = _infer_intent(text) or "ask"
+
+    if intent != "schedule":
+        recurrence = None
+
+    if intent == result.intent and recurrence == result.recurrence_interval:
+        return result
+    return result.model_copy(
+        update={"intent": intent, "recurrence_interval": recurrence}
+    )
+
+
 def _regex_extract(text: str) -> BillExtractionResult:
     """Best-effort bill extraction when no LLM is available.
 
@@ -127,11 +241,12 @@ def _regex_extract(text: str) -> BillExtractionResult:
     """
     amount_match = _AMOUNT_RE.search(text)
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
-    return BillExtractionResult(
+    result = BillExtractionResult(
         vendor_name=_detect_vendor(text),
         amount=amount,
         raw_text=text,
     )
+    return _apply_intent_fallback(result, text)
 
 
 # ── Local OCR fallback (RapidOCR / ONNX Runtime) ─────────────────────
@@ -217,13 +332,19 @@ class TextLoader(BaseLoader):
                 "For the `due_date` field, ALWAYS return an ISO 8601 date "
                 "string in the form `YYYY-MM-DD` (or null if the bill "
                 "has no due date). Do not return times, timezones, or "
-                "natural-language phrases — just the bare date."
+                "natural-language phrases — just the bare date. "
+                "Set `intent` to 'pay_now' only if the user asks to pay "
+                "immediately ('pay now', 'today', 'asap'); to 'schedule' "
+                "if they ask to defer or give a future date ('next week', "
+                "'on the 20th', 'don't pay yet'); otherwise 'ask'. "
+                "Set `recurrence_interval` to 'monthly' or 'weekly' only "
+                "if they describe a repeating bill ('every month')."
             ),
             user=f"Extract details from this message:\n\n{self.text}",
         )
         if result is not None:
             result.raw_text = self.text
-            return result
+            return _apply_intent_fallback(result, self.text)
         return _regex_extract(self.text)
 
 
@@ -265,13 +386,16 @@ class PDFLoader(BaseLoader):
                 "accurately. Leave fields null if not present in the text. "
                 "For the `due_date` field, ALWAYS return an ISO 8601 date "
                 "string in the form `YYYY-MM-DD` (or null). Do not return "
-                "times, timezones, or natural-language phrases."
+                "times, timezones, or natural-language phrases. "
+                "Set `recurrence_interval` to 'monthly' or 'weekly' if the "
+                "document describes a repeating bill; leave `intent` as "
+                "'ask' (the user will choose when to pay)."
             ),
             user=f"Extract details from this bill text:\n\n{text[:8000]}",
         )
         if result is not None:
             result.raw_text = text
-            return result
+            return _apply_intent_fallback(result, text)
         return _regex_extract(text)
 
 
@@ -312,7 +436,9 @@ class ImageLoader(BaseLoader):
         "For the `due_date` field, ALWAYS return an ISO 8601 date "
         "string in the form `YYYY-MM-DD` (or null if not visible). "
         "Do not return times, timezones, or natural-language "
-        "phrases like 'next Friday'."
+        "phrases like 'next Friday'. "
+        "Set `recurrence_interval` to 'monthly' or 'weekly' if the bill "
+        "is a repeating one; leave `intent` as 'ask'."
     )
 
     async def extract(self) -> BillExtractionResult:
@@ -324,7 +450,7 @@ class ImageLoader(BaseLoader):
         if client is not None:
             try:
                 result = client.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    model="qwen/qwen3.8-27b",
                     response_model=BillExtractionResult,
                     messages=[
                         {
@@ -337,7 +463,7 @@ class ImageLoader(BaseLoader):
                     ],
                     strict=True,
                 )
-                return result
+                return _apply_intent_fallback(result, result.raw_text or "")
             except Exception as exc:
                 logger.warning("Vision LLM failed, trying OCR fallback: %s", exc)
 
@@ -350,13 +476,15 @@ class ImageLoader(BaseLoader):
                     "accurately. Leave fields null if not present in the text. "
                     "For the `due_date` field, ALWAYS return an ISO 8601 date "
                     "string in the form `YYYY-MM-DD` (or null). Do not return "
-                    "times, timezones, or natural-language phrases."
+                    "times, timezones, or natural-language phrases. "
+                    "Set `recurrence_interval` to 'monthly' or 'weekly' if the "
+                    "bill is a repeating one; leave `intent` as 'ask'."
                 ),
                 user=f"Extract details from this bill text:\n\n{ocr_text[:8000]}",
             )
             if result is not None:
                 result.raw_text = ocr_text
-                return result
+                return _apply_intent_fallback(result, ocr_text)
 
         # ── Tier 3: local OCR → regex ──────────────────────────────
         if ocr_text.strip():

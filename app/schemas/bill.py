@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +27,19 @@ class BillExtractionResult(BaseModel):
     account_number: str | None = None
     bank_code: str | None = None
     bank_name: str | None = None
+
+    # What the user actually asked for:
+    #   "pay_now"  - pay this immediately ("pay now", "today", "asap")
+    #   "schedule" - hold it for the due date ("next week", "don't pay yet")
+    #   "ask"      - they did not say, so the caller must let them choose
+    # The keyword fallback in `services/loaders.py` fills this in when the
+    # LLM leaves it at "ask", so behaviour does not depend on the model.
+    intent: Literal["pay_now", "schedule", "ask"] = "ask"
+
+    # Only meaningful together with a scheduled intent. Mirrors the
+    # `recurrence_interval` the /schedule command accepts.
+    recurrence_interval: Literal["weekly", "monthly"] | None = None
+
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     raw_text: str | None = None
 

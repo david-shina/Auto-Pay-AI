@@ -282,3 +282,116 @@ async def test_image_loader_uses_ocr_regex_when_text_llm_also_fails() -> None:
         result = await loader.extract()
     assert result.vendor_name == "AEDC"
     assert float(result.amount) == 7500.0
+
+
+# ── Payment-intent inference ───────────────────────────────────────
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Pay MTN 5000 now", "pay_now"),
+        ("pay it immediately", "pay_now"),
+        ("ASAP please", "pay_now"),
+        ("urgent, settle today", "pay_now"),
+        ("Pay it later", "schedule"),
+        ("don't pay now, schedule it for the 20th", "schedule"),
+        ("Remind me next week", "schedule"),
+        ("defer this until next month", "schedule"),
+        ("Pay on the 20th", "schedule"),
+        ("pay next week", "schedule"),
+        # Facts, not instructions - leave it to the user.
+        ("Due today", None),
+        ("Send 5k for electricity", None),
+        ("", None),
+    ],
+)
+def test_infer_intent(text: str, expected: str | None) -> None:
+    assert loaders._infer_intent(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Pay DSTV every month", "monthly"),
+        ("monthly subscription", "monthly"),
+        ("each week", "weekly"),
+        ("weekly bill", "weekly"),
+        ("every two weeks", None),  # not one of our supported intervals
+        ("one off payment", None),
+    ],
+)
+def test_infer_recurrence(text: str, expected: str | None) -> None:
+    assert loaders._infer_recurrence(text) == expected
+
+
+def test_apply_intent_fallback_refines_ask_from_text() -> None:
+    result = BillExtractionResult(vendor_name="MTN", amount=5000)
+    assert result.intent == "ask"
+
+    refined = loaders._apply_intent_fallback(result, "pay this now")
+
+    assert refined.intent == "pay_now"
+    assert result.intent == "ask"  # original untouched
+
+
+def test_apply_intent_fallback_keeps_an_explicit_answer() -> None:
+    result = BillExtractionResult(vendor_name="MTN", amount=5000, intent="pay_now")
+
+    refined = loaders._apply_intent_fallback(result, "no instruction here")
+
+    assert refined.intent == "pay_now"
+
+
+def test_apply_intent_fallback_schedule_beats_pay_now_in_text() -> None:
+    result = BillExtractionResult(vendor_name="MTN", amount=5000)
+
+    refined = loaders._apply_intent_fallback(result, "don't pay now, later")
+
+    assert refined.intent == "schedule"
+
+
+def test_recurrence_forces_a_scheduled_intent() -> None:
+    # "pay now, every month" is contradictory: recurrence is structural.
+    result = BillExtractionResult(
+        vendor_name="DSTV", amount=12500, intent="pay_now"
+    )
+
+    refined = loaders._apply_intent_fallback(result, "pay now, every month")
+
+    assert refined.intent == "schedule"
+    assert refined.recurrence_interval == "monthly"
+
+
+def test_a_pay_now_bill_never_carries_a_recurrence() -> None:
+    result = BillExtractionResult(
+        vendor_name="DSTV", amount=12500, intent="pay_now"
+    )
+
+    refined = loaders._apply_intent_fallback(result, "pay today")
+
+    assert refined.intent == "pay_now"
+    assert refined.recurrence_interval is None
+
+
+def test_recurrence_alone_implies_schedule() -> None:
+    result = BillExtractionResult(vendor_name="DSTV", amount=12500)
+
+    refined = loaders._apply_intent_fallback(result, "every week")
+
+    assert refined.intent == "schedule"
+    assert refined.recurrence_interval == "weekly"
+
+
+def test_regex_extract_carries_intent_from_the_text() -> None:
+    result = loaders._regex_extract("Pay MTN 5,000 now")
+    assert result.intent == "pay_now"
+
+    recurring = loaders._regex_extract("DSTV 12,500 every month")
+    assert recurring.intent == "schedule"
+    assert recurring.recurrence_interval == "monthly"
+
+
+def test_extraction_defaults_sit_at_ask() -> None:
+    result = BillExtractionResult(vendor_name="X", amount=1)
+    assert result.intent == "ask"
+    assert result.recurrence_interval is None
