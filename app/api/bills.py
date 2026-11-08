@@ -5,7 +5,6 @@ Mounted at /api/v1/bills in `app.main`.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from decimal import Decimal
 
 from fastapi import (
@@ -37,7 +36,7 @@ from app.schemas.bill import (
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
 from app.services.banks import get_bank_directory
-from app.services.date_parser import parse_bill_due_date
+from app.services.date_parser import days_until, parse_bill_due_date
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
 from app.services.payout import execute_payout, finalize_pending_transfer
@@ -188,7 +187,7 @@ async def upload_bill(
     )
 
     # 3. Run the decision agent
-    days_until_due = (bill.due_date - datetime.now()).days
+    days_until_due = days_until(bill.due_date)
     decision = run_agent(
         user_balance=Decimal(str(user.balance)),
         bill_amount=Decimal(str(bill.amount)),

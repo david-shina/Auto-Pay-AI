@@ -56,7 +56,7 @@ from app.handlers.helpers import (
 from app.models.bill import Bill
 from app.models.enums import BillStatus
 from app.services.audit import audit_bill_created
-from app.services.date_parser import parse_bill_due_date
+from app.services.date_parser import days_until, parse_bill_due_date
 from app.services.name_match import names_match
 from app.services.payments import (
     InvalidAccountError,
@@ -218,6 +218,10 @@ async def handle_confirm(
             amount=float(bill.amount),
             provider="paystack",
         )
+        # `session_scope()` is a plain Session context manager: it closes
+        # without committing, so without this the bill is rolled back and
+        # the next step cannot find it ("Session expired").
+        session.commit()
     context.user_data["bill_id"] = bill_id
 
     # No payout account configured → skip the resolve step and let
@@ -404,7 +408,7 @@ async def _run_agent_decision(
             await safe_edit(query, "Session expired. Send the bill again.")
             return ConversationHandler.END
 
-    days_until_due = (bill.due_date - datetime.now()).days
+    days_until_due = days_until(bill.due_date)
     decision = run_agent(
         user_balance=user_balance,
         bill_amount=Decimal(str(bill.amount)),
@@ -447,15 +451,27 @@ async def _run_agent_decision(
     if decision.decision == Decision.SCHEDULE:
         with session_scope() as session:
             bill = session.get(Bill, bill_id)
-            if bill:
+            if bill is not None:
+                # Read what the message needs *before* committing:
+                # `commit()` expires the instance and the session closes
+                # immediately after, so `bill.amount` would raise.
+                scheduled_amount = bill.amount
+                scheduled_due = bill.due_date
                 bill.status = BillStatus.SCHEDULED.value
                 session.add(bill)
+                # Without this the status flip is rolled back on close and
+                # the scheduler (which only claims `scheduled` bills) never
+                # sees it.
+                session.commit()
+            else:  # pragma: no cover - the bill was committed just above
+                scheduled_amount = Decimal(str(bill_data.get("amount") or 0))
+                scheduled_due = parse_bill_due_date(bill_data.get("due_date"))
         await safe_edit(query, 
             f"🤖 *Agent says: Schedule*\n"
             f"_{decision.reason}_\n\n"
             f"🗓 *Payment Scheduled*\n\n"
-            f"₦{float(bill.amount):,.2f} → {escape_md(bill_data['vendor_name'])}\n"
-            f"Due: {bill.due_date.date().isoformat()}\n\n"
+            f"₦{float(scheduled_amount):,.2f} → {escape_md(bill_data['vendor_name'])}\n"
+            f"Due: {scheduled_due.date().isoformat()}\n\n"
             f"I'll process it automatically when it's due.",
             parse_mode="Markdown",
         )

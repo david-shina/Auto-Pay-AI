@@ -435,7 +435,6 @@ def _autopay_one_bill(bill_id: int) -> None:
     payout. Called from the scheduler loop; errors are caught by the
     caller so this never crashes the loop.
     """
-    from datetime import datetime
     from decimal import Decimal
 
     from app.agents.graphs import run_agent
@@ -446,6 +445,7 @@ def _autopay_one_bill(bill_id: int) -> None:
     from app.models.enums import AuditActor, AuditEntityType, AuditEventType, BillStatus
     from app.models.user import User
     from app.services.audit import write_audit
+    from app.services.date_parser import days_until
     from app.services.payments import (
         PaymentError,
     )
@@ -461,11 +461,7 @@ def _autopay_one_bill(bill_id: int) -> None:
             return
 
         # Re-evaluate the agent
-        now = datetime.now()
-        due_date = db_bill.due_date
-        if due_date.tzinfo is not None:
-            due_date = due_date.replace(tzinfo=None)
-        days_until_due = (due_date - now).days
+        days_until_due = days_until(db_bill.due_date)
         decision = run_agent(
             user_balance=Decimal(str(user.balance)),
             bill_amount=Decimal(str(db_bill.amount)),

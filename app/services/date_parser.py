@@ -29,6 +29,31 @@ logger = logging.getLogger(__name__)
 
 # ── Public API ───────────────────────────────────────────────────────
 
+def days_until(due: datetime, *, now: datetime | None = None) -> int:
+    """Whole days from `now` to `due`, tolerating mixed tz-awareness.
+
+    A `due_date` read back from a `TIMESTAMPTZ` column is tz-aware, while
+    `datetime.now()` is naive - subtracting them raises `TypeError:
+    can't subtract offset-naive and offset-aware datetimes`. Every caller
+    that compares a stored due date to "now" hit this as soon as the row
+    was loaded from the database rather than built in Python.
+
+    When the two sides disagree we drop the tzinfo from the aware one.
+    That keeps the app's existing convention (everything is stored as
+    local time) rather than guessing an offset.
+    """
+    if now is None:
+        now = datetime.now()
+
+    if (due.tzinfo is None) != (now.tzinfo is None):
+        if due.tzinfo is not None:
+            due = due.replace(tzinfo=None)
+        else:
+            now = now.replace(tzinfo=None)
+
+    return (due - now).days
+
+
 def parse_bill_due_date(raw: None | str | datetime) -> datetime:
     """Best-effort parse. Never raises; falls back to `datetime.now()`."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):

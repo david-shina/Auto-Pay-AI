@@ -946,3 +946,78 @@ async def test_start_mentions_topup() -> None:
     await start_command(update, _FakeContext(99009))
     body = "\n".join(msg.replies)
     assert "/topup" in body
+
+
+# ── handle_confirm: persistence regression ─────────────────────────
+#
+# `session_scope()` does not commit, so the bill created here used to be
+# rolled back when the block exited. The agent step then found no bill
+# and always answered "Session expired. Send the bill again." These pin
+# both commits: creating the bill, and flipping it to `scheduled`.
+
+
+def _bill_context_without_account(ctx: _FakeContext, *, days_ahead: int) -> None:
+    """Seed the confirm screen with a bill that needs no bank resolve.
+
+    With no account/bank, `handle_confirm` goes straight to the agent
+    instead of calling the provider, so no stub is needed.
+    """
+    _seed_bill_context(ctx)
+    ctx.user_data["bill"]["account_number"] = None
+    ctx.user_data["bill"]["bank_code"] = None
+    ctx.user_data["bill"]["due_date"] = (
+        datetime.now(UTC) + timedelta(days=days_ahead)
+    ).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_handle_confirm_persists_the_bill_and_schedules_it(session) -> None:
+    from sqlmodel import Session, select
+
+    from app.core.database import engine
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="aaa11111@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_without_account(ctx, days_ahead=10)
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 10_000.0  # covers amount + fee
+
+    await bc.handle_confirm(_FakeUpdate(_FakeCallbackQuery(data="confirm")), ctx)
+
+    # `_run_agent_decision` clears user_data at the end, so look the bill
+    # up by owner rather than by the id it stashed mid-flow.
+    with Session(engine) as fresh:
+        stored = fresh.exec(
+            select(Bill).where(Bill.user_id == user.id).order_by(Bill.id.desc())
+        ).first()
+        assert stored is not None, "bill was rolled back - missing commit"
+        assert stored.user_id == user.id
+        # Due in 10 days (> 3-day cutoff) => the agent schedules it, and
+        # that status flip must be committed too.
+        assert stored.status == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_handle_confirm_persists_the_bill_when_the_agent_holds(session) -> None:
+    from sqlmodel import Session, select
+
+    from app.core.database import engine
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="bbb22222@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_without_account(ctx, days_ahead=10)
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 0.0  # below amount + fee -> HOLD
+
+    await bc.handle_confirm(_FakeUpdate(_FakeCallbackQuery(data="confirm")), ctx)
+
+    with Session(engine) as fresh:
+        stored = fresh.exec(
+            select(Bill).where(Bill.user_id == user.id).order_by(Bill.id.desc())
+        ).first()
+        assert stored is not None, "bill was rolled back - missing commit"
+        assert stored.status == "pending"

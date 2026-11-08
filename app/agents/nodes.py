@@ -18,6 +18,7 @@ from decimal import Decimal
 from app.agents.state import AgentState, Decision, DecisionResult
 from app.models.bill import Bill
 from app.models.user import User
+from app.services.date_parser import days_until
 
 
 def decide(
@@ -71,7 +72,7 @@ def decide_for_bill(
 ) -> DecisionResult:
     """Convenience wrapper for the (Bill, User) pair."""
     now = now or datetime.now(tz=UTC)
-    days_until_due = (bill.due_date - now).days
+    days_until_due = days_until(bill.due_date, now=now)
     return decide(
         user_balance=Decimal(str(user.balance)),
         bill_amount=Decimal(str(bill.amount)),
