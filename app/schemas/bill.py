@@ -73,6 +73,16 @@ class BillBankUpdateRequest(BaseModel):
     bank_name: str | None = Field(default=None, max_length=128)
 
 
+class BillScheduleRequest(BaseModel):
+    """Schedule an existing bill, optionally as a recurring one.
+
+    Sent after an upload/create, once the user has chosen to defer.
+    """
+
+    due_date: datetime | None = None
+    recurrence_interval: Literal["weekly", "monthly"] | None = None
+
+
 class TransferOtpRequest(BaseModel):
     """OTP to finish a transfer the provider parked awaiting approval."""
 

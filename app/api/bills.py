@@ -31,6 +31,7 @@ from app.schemas.bill import (
     BillBankUpdateRequest,
     BillCreateRequest,
     BillResponse,
+    BillScheduleRequest,
     TransferOtpRequest,
 )
 from app.services.audit import audit_bill_created
@@ -183,7 +184,9 @@ async def upload_bill(
         user_id=user.id,
         bill_id=bill.id,
         amount=float(bill.amount),
-        provider=provider,
+        # `audit_bill_created` writes this into JSONB metadata, so it
+        # must be the provider's name, not the provider object.
+        provider=provider.name,
     )
 
     # 3. Run the decision agent
@@ -195,25 +198,25 @@ async def upload_bill(
         days_until_due=days_until_due,
     )
 
-    # 4. If agent says pay_now, run the payout
-    message = "Bill created."
-    if decision.decision == Decision.PAY_NOW:
-        try:
-            result = await execute_payout(session, bill_id=bill.id, provider=provider)
-            session.commit()
-            message = result.message
-            from app.core.metrics import record_bill_paid, record_payout
-            record_bill_paid(trigger="manual")
-            record_payout(result="success")
-        except HTTPException:
-            session.rollback()
-            # Payout refused (insufficient funds, etc). Bill is still
-            # in the DB; the user can /pay it again later.
-            message = "Bill created; payout deferred (see decision reason)."
-    elif decision.decision == Decision.SCHEDULE:
-        bill.status = BillStatus.SCHEDULED.value
-        session.add(bill)
-        message = "Bill scheduled for later evaluation."
+    # 4. Recommend an action. No money moves here: the caller must hit
+    # `POST /bills/{id}/pay` or `POST /bills/{id}/schedule`. An explicit
+    # intent from the bill overrides the agent's recommendation, but it
+    # still needs that tap.
+    recommended = decision.decision
+    if extracted.intent == "pay_now" and recommended != Decision.HOLD:
+        recommended = Decision.PAY_NOW
+    elif extracted.intent == "schedule":
+        recommended = Decision.SCHEDULE
+
+    if recommended == Decision.PAY_NOW:
+        message = "Bill created. Pay it now, or schedule it for its due date."
+    elif recommended == Decision.SCHEDULE:
+        message = "Bill created. Schedule it for its due date, or pay it now."
+    else:
+        message = (
+            "Bill created. Your balance does not cover it yet - top up, "
+            "or schedule it for its due date."
+        )
 
     session.commit()
     session.refresh(bill)
@@ -222,7 +225,7 @@ async def upload_bill(
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
         message=message,
-        decision=decision.decision.value,
+        decision=recommended.value,
         decision_reason=decision.reason,
     )
 
@@ -419,6 +422,70 @@ async def submit_transfer_otp(
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
         message=result.message,
+    )
+
+
+# ── POST /bills/{id}/schedule ───────────────────────────────────────
+
+@router.post("/{bill_id}/schedule", response_model=BillActionResponse)
+def schedule_bill(
+    bill_id: int,
+    payload: BillScheduleRequest,
+    session: Session = Depends(get_session),
+    user: User = Depends(get_current_active_user),
+) -> BillActionResponse:
+    """Defer a bill to its due date, optionally as a recurring bill.
+
+    The counterpart to `/pay`: it moves no money now, so no confirmation
+    is needed beyond the request itself. The scheduler pays it when due.
+    """
+    bill = session.get(Bill, bill_id)
+    if bill is None or bill.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Bill not found")
+    if bill.status in (BillStatus.PAID.value, BillStatus.PROCESSING.value):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This bill has already been paid or is being paid.",
+        )
+
+    if payload.due_date is not None:
+        bill.due_date = payload.due_date
+
+    interval = payload.recurrence_interval
+    if interval:
+        if not bill.account_number or not bill.bank_code:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Recurring bills need an account number and bank code "
+                    "so the scheduler can pay them."
+                ),
+            )
+        bill.is_recurring = True
+        bill.recurrence_interval = interval
+        bill.next_recurrence_date = bill.due_date
+    else:
+        bill.is_recurring = False
+        bill.recurrence_interval = None
+        bill.next_recurrence_date = None
+
+    bill.status = BillStatus.SCHEDULED.value
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+
+    if days_until(bill.due_date) <= 0:
+        message = "Bill scheduled; it is already due, so the next scheduler run will pay it"
+    else:
+        message = f"Bill scheduled for {bill.due_date.date().isoformat()}"
+    if interval:
+        message += f", repeating {interval}."
+    else:
+        message += "."
+
+    return BillActionResponse(
+        bill=BillResponse.model_validate(bill),
+        message=message,
     )
 
 
