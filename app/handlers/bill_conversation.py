@@ -51,6 +51,7 @@ from app.handlers.helpers import (
     get_linked_user,
     multi_field_editor_keyboard,
     parse_user_date,
+    payment_choice_keyboard,
     safe_edit,
 )
 from app.models.bill import Bill
@@ -135,6 +136,11 @@ async def receive_bill(
         "due_date": extracted.due_date or "",
         "account_number": extracted.account_number or "",
         "bank_code": extracted.bank_code or "",
+        # What the user asked for ("pay_now" / "schedule" / "ask") and any
+        # recurrence. The agent only recommends; an explicit intent is
+        # honoured without a second question.
+        "intent": extracted.intent,
+        "recurrence_interval": extracted.recurrence_interval,
     }
     context.user_data["staging"] = dict(context.user_data["bill"])
     context.user_data["edited_keys"] = set()
@@ -418,7 +424,12 @@ async def _run_agent_decision(
 
     context.user_data["bill_id"] = bill_id
 
-    if decision.decision == Decision.PAY_NOW:
+    # What the user asked for. The agent only recommends; an explicit
+    # intent is honoured without a second question, and money only ever
+    # moves on a tap.
+    intent = bill_data.get("intent", "ask")
+
+    if intent == "pay_now" and decision.decision != Decision.HOLD:
         fee = Decimal(str(settings.payout_fee_ngn))
         total = Decimal(str(bill.amount)) + fee
         resolved_name = context.user_data.get("resolved_account_name")
@@ -432,9 +443,7 @@ async def _run_agent_decision(
             else ""
         )
         await safe_edit(query, 
-            f"🤖 *Agent says: Pay Now*\n"
-            f"_{decision.reason}_\n\n"
-            f"💳 *Payment Summary*\n"
+            f"💳 *Payment Summary* — you asked to pay now\n"
             f"Vendor: *{escape_md(bill_data['vendor_name'])}*\n"
             f"Account: `{escape_md(bill_data.get('account_number', 'N/A'))}`\n"
             f"{bank_line}\n"
@@ -448,49 +457,115 @@ async def _run_agent_decision(
         )
         return FINAL_CONFIRM
 
-    if decision.decision == Decision.SCHEDULE:
-        with session_scope() as session:
-            bill = session.get(Bill, bill_id)
-            if bill is not None:
-                # Read what the message needs *before* committing:
-                # `commit()` expires the instance and the session closes
-                # immediately after, so `bill.amount` would raise.
-                scheduled_amount = bill.amount
-                scheduled_due = bill.due_date
-                bill.status = BillStatus.SCHEDULED.value
-                session.add(bill)
-                # Without this the status flip is rolled back on close and
-                # the scheduler (which only claims `scheduled` bills) never
-                # sees it.
-                session.commit()
-            else:  # pragma: no cover - the bill was committed just above
-                scheduled_amount = Decimal(str(bill_data.get("amount") or 0))
-                scheduled_due = parse_bill_due_date(bill_data.get("due_date"))
-        await safe_edit(query, 
-            f"🤖 *Agent says: Schedule*\n"
-            f"_{decision.reason}_\n\n"
-            f"🗓 *Payment Scheduled*\n\n"
-            f"₦{float(scheduled_amount):,.2f} → {escape_md(bill_data['vendor_name'])}\n"
-            f"Due: {scheduled_due.date().isoformat()}\n\n"
-            f"I'll process it automatically when it's due.",
-            parse_mode="Markdown",
-        )
-        context.user_data.clear()
-        return ConversationHandler.END
+    if intent == "schedule":
+        return await _schedule_and_reply(query, context, bill_id, bill_data)
 
-    # Decision.HOLD
+    # No explicit intent (or an explicit "pay now" we cannot afford): the
+    # user chooses. Paying requires this tap; scheduling moves no money
+    # now, so it stays available even when the balance is short.
     fee = Decimal(str(settings.payout_fee_ngn))
     total = Decimal(str(bill.amount)) + fee
-    await safe_edit(query, 
-        f"🤖 *Agent says: Hold*\n"
-        f"_{decision.reason}_\n\n"
-        f"⏸ *Payment on Hold*\n\n"
-        f"Bill: ₦{float(bill.amount):,.2f} to {escape_md(bill_data['vendor_name'])}\n"
-        f"Your Balance: ₦{float(user_balance):,.2f}\n"
-        f"Shortfall: ₦{float(max(Decimal(0), total - user_balance)):,.2f}\n\n"
-        f"Top up your wallet with `/wallet` and send the bill again.",
-        parse_mode="Markdown",
+    due_label = bill.due_date.strftime("%d %b")
+
+    if decision.decision == Decision.HOLD:
+        await safe_edit(query, 
+            f"🤖 *Agent says: Hold*\n"
+            f"_{decision.reason}_\n\n"
+            f"⏸ *Balance too low to pay now*\n\n"
+            f"Bill: ₦{float(bill.amount):,.2f} to {escape_md(bill_data['vendor_name'])}\n"
+            f"Your Balance: ₦{float(user_balance):,.2f}\n"
+            f"Shortfall: ₦{float(max(Decimal(0), total - user_balance)):,.2f}\n\n"
+            f"You can schedule it now and top up before it's due.",
+            parse_mode="Markdown",
+            reply_markup=payment_choice_keyboard(
+                amount_label=f"₦{float(total):,.2f}",
+                due_label=due_label,
+                allow_pay_now=False,
+            ),
+        )
+        return FINAL_CONFIRM
+
+    recommendation = (
+        "Pay Now" if decision.decision == Decision.PAY_NOW else "Schedule"
     )
+    await safe_edit(query, 
+        f"🤖 *Agent suggests: {recommendation}*\n"
+        f"_{decision.reason}_\n\n"
+        f"💳 *{escape_md(bill_data['vendor_name'])}*\n"
+        f"Amount: ₦{float(bill.amount):,.2f} + ₦{float(fee):,.2f} fee\n"
+        f"Total:  ₦{float(total):,.2f}\n"
+        f"Due:    {bill.due_date.date().isoformat()}\n\n"
+        f"What would you like to do?",
+        parse_mode="Markdown",
+        reply_markup=payment_choice_keyboard(
+            amount_label=f"₦{float(total):,.2f}",
+            due_label=due_label,
+        ),
+    )
+    return FINAL_CONFIRM
+
+
+def _schedule_bill(
+    bill_id: int, bill_data: dict
+) -> tuple[Decimal, datetime, str | None, str | None]:
+    """Mark the bill scheduled, applying recurrence when it makes sense.
+
+    Returns `(amount, due_date, recurrence_applied, recurrence_requested)`.
+    A recurrence is only written when the bill has a payout destination -
+    the scheduler cannot pay a recurring bill it has nowhere to send.
+    """
+    interval = bill_data.get("recurrence_interval")
+    has_destination = bool(bill_data.get("account_number")) and bool(
+        bill_data.get("bank_code")
+    )
+
+    with session_scope() as session:
+        bill = session.get(Bill, bill_id)
+        if bill is None:  # pragma: no cover - committed just before
+            return (
+                Decimal(str(bill_data.get("amount") or 0)),
+                parse_bill_due_date(bill_data.get("due_date")),
+                None,
+                interval,
+            )
+
+        # Read before commit: commit() expires the instance and the
+        # session closes immediately after.
+        amount, due = bill.amount, bill.due_date
+        applied = interval if (interval and has_destination) else None
+
+        bill.status = BillStatus.SCHEDULED.value
+        if applied:
+            bill.is_recurring = True
+            bill.recurrence_interval = applied
+            bill.next_recurrence_date = bill.due_date
+        session.add(bill)
+        session.commit()
+
+    return amount, due, applied, interval
+
+
+async def _schedule_and_reply(
+    query, context, bill_id: int, bill_data: dict
+) -> int:
+    """Schedule the bill and confirm it to the user."""
+    amount, due, recurrence, requested = _schedule_bill(bill_id, bill_data)
+
+    lines = [
+        "🗓 *Payment Scheduled*",
+        "",
+        f"₦{float(amount):,.2f} → {escape_md(bill_data.get('vendor_name', ''))}",
+        f"Due: {due.date().isoformat()}",
+    ]
+    if recurrence:
+        lines.append(f"Repeats *{recurrence}*.")
+    elif requested:
+        lines.append(
+            "_Recurrence skipped: add an account number and bank to enable it._"
+        )
+    lines += ["", "I'll pay it automatically when it's due."]
+
+    await safe_edit(query, "\n".join(lines), parse_mode="Markdown")
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -719,6 +794,22 @@ async def handle_new_value(
 
 # ── Step 4: final confirm → execute payout ─────────────────────────
 
+async def handle_final_schedule(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> int:
+    """User chose "Schedule for <date>" on the payment choice."""
+    query = update.callback_query
+    await query.answer()
+
+    bill_id = context.user_data.get("bill_id")
+    bill_data = context.user_data.get("bill", {})
+    if not bill_id:
+        await safe_edit(query, "Session expired. Send the bill again.")
+        return ConversationHandler.END
+
+    return await _schedule_and_reply(query, context, bill_id, bill_data)
+
+
 async def handle_final_confirm(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
@@ -846,7 +937,12 @@ def build_bill_conversation() -> ConversationHandler:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_new_value),
             ],
             FINAL_CONFIRM: [
-                CallbackQueryHandler(handle_final_confirm, pattern="^final_confirm$"),
+                CallbackQueryHandler(
+                    handle_final_confirm, pattern="^(final_confirm|final_pay)$"
+                ),
+                CallbackQueryHandler(
+                    handle_final_schedule, pattern="^final_schedule$"
+                ),
                 CallbackQueryHandler(handle_cancel, pattern="^final_cancel$"),
             ],
         },

@@ -468,6 +468,7 @@ class _FakeCallbackQuery:
         self.data = data
         self.answered: list[None] = []
         self.edits: list[str] = []
+        self.markups: list[Any] = []
         self.message = _FakeMessage(chat_id)
 
     async def answer(self) -> None:
@@ -475,6 +476,7 @@ class _FakeCallbackQuery:
 
     async def edit_message_text(self, text: str, **kwargs: Any) -> None:
         self.edits.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
 
 
 def _seed_bill_context(ctx: _FakeContext) -> None:
@@ -971,7 +973,7 @@ def _bill_context_without_account(ctx: _FakeContext, *, days_ahead: int) -> None
 
 
 @pytest.mark.asyncio
-async def test_handle_confirm_persists_the_bill_and_schedules_it(session) -> None:
+async def test_handle_confirm_persists_the_bill(session) -> None:
     from sqlmodel import Session, select
 
     from app.core.database import engine
@@ -984,7 +986,8 @@ async def test_handle_confirm_persists_the_bill_and_schedules_it(session) -> Non
     ctx.user_data["user_id"] = user.id
     ctx.user_data["user_balance"] = 10_000.0  # covers amount + fee
 
-    await bc.handle_confirm(_FakeUpdate(_FakeCallbackQuery(data="confirm")), ctx)
+    query = _FakeCallbackQuery(data="confirm")
+    await bc.handle_confirm(_FakeUpdate(query), ctx)
 
     # `_run_agent_decision` clears user_data at the end, so look the bill
     # up by owner rather than by the id it stashed mid-flow.
@@ -994,9 +997,13 @@ async def test_handle_confirm_persists_the_bill_and_schedules_it(session) -> Non
         ).first()
         assert stored is not None, "bill was rolled back - missing commit"
         assert stored.user_id == user.id
-        # Due in 10 days (> 3-day cutoff) => the agent schedules it, and
-        # that status flip must be committed too.
-        assert stored.status == "scheduled"
+        # With no explicit intent the bill waits for the user's choice.
+        assert stored.status == "pending"
+
+    # ...and the choice was actually offered.
+    offered = _callback_data(query.markups[-1])
+    assert "final_pay" in offered
+    assert "final_schedule" in offered
 
 
 @pytest.mark.asyncio
@@ -1021,3 +1028,222 @@ async def test_handle_confirm_persists_the_bill_when_the_agent_holds(session) ->
         ).first()
         assert stored is not None, "bill was rolled back - missing commit"
         assert stored.status == "pending"
+
+
+# ── Payment intent: pay now vs schedule ────────────────────────────
+
+
+def _callback_data(markup: Any) -> list[str]:
+    if markup is None:
+        return []
+    return [
+        button.callback_data
+        for row in markup.inline_keyboard
+        for button in row
+        if button.callback_data
+    ]
+
+
+def _bill_context_with_intent(
+    ctx: _FakeContext,
+    *,
+    days_ahead: int,
+    intent: str,
+    recurrence: str | None = None,
+) -> None:
+    _bill_context_without_account(ctx, days_ahead=days_ahead)
+    ctx.user_data["bill"]["intent"] = intent
+    ctx.user_data["bill"]["recurrence_interval"] = recurrence
+
+
+@pytest.mark.asyncio
+async def test_ask_intent_offers_both_payment_choices(session) -> None:
+    from app.handlers import bill_conversation as bc
+
+    user = _link_user_sync(session, email="choice1@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_with_intent(ctx, days_ahead=10, intent="ask")
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 10_000.0
+
+    query = _FakeCallbackQuery(data="confirm")
+    result = await bc.handle_confirm(_FakeUpdate(query), ctx)
+
+    assert result == bc.FINAL_CONFIRM
+    offered = _callback_data(query.markups[-1])
+    assert "final_pay" in offered
+    assert "final_schedule" in offered
+
+
+@pytest.mark.asyncio
+async def test_explicit_pay_now_skips_the_choice(session) -> None:
+    """Even when the agent would schedule (due in 10 days), an explicit
+    'pay now' goes straight to the payment confirmation."""
+    from app.handlers import bill_conversation as bc
+
+    user = _link_user_sync(session, email="choice2@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_with_intent(ctx, days_ahead=10, intent="pay_now")
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 10_000.0
+
+    query = _FakeCallbackQuery(data="confirm")
+    result = await bc.handle_confirm(_FakeUpdate(query), ctx)
+
+    assert result == bc.FINAL_CONFIRM
+    offered = _callback_data(query.markups[-1])
+    assert "final_confirm" in offered
+    assert "final_schedule" not in offered
+
+
+@pytest.mark.asyncio
+async def test_explicit_schedule_schedules_without_paying(session) -> None:
+    """Even when the agent would pay now (due in 2 days), 'schedule'
+    defers it and never touches the wallet."""
+    from sqlmodel import Session, select
+
+    from app.core.database import engine
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="choice3@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_with_intent(ctx, days_ahead=2, intent="schedule")
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 10_000.0
+
+    result = await bc.handle_confirm(
+        _FakeUpdate(_FakeCallbackQuery(data="confirm")), ctx
+    )
+
+    assert result == bc.ConversationHandler.END
+    with Session(engine) as fresh:
+        stored = fresh.exec(
+            select(Bill).where(Bill.user_id == user.id).order_by(Bill.id.desc())
+        ).first()
+        assert stored is not None
+        assert stored.status == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_short_balance_offers_schedule_but_not_pay_now(session) -> None:
+    from app.handlers import bill_conversation as bc
+
+    user = _link_user_sync(session, email="choice4@x.com")
+    ctx = _FakeContext(1)
+    _bill_context_with_intent(ctx, days_ahead=10, intent="ask")
+    ctx.user_data["user_id"] = user.id
+    ctx.user_data["user_balance"] = 0.0
+
+    query = _FakeCallbackQuery(data="confirm")
+    result = await bc.handle_confirm(_FakeUpdate(query), ctx)
+
+    assert result == bc.FINAL_CONFIRM
+    offered = _callback_data(query.markups[-1])
+    assert "final_schedule" in offered
+    assert "final_pay" not in offered
+
+
+@pytest.mark.asyncio
+async def test_handle_final_schedule_schedules_the_bill(session) -> None:
+    from datetime import datetime as _dt
+
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="choice5@x.com")
+    bill = Bill(
+        user_id=user.id,
+        vendor_name="DSTV",
+        amount=5000,
+        currency="NGN",
+        due_date=_dt.now() + timedelta(days=5),
+        account_number="0123456789",
+        bank_code="058",
+        status="pending",
+    )
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+
+    ctx = _FakeContext(1)
+    ctx.user_data["bill_id"] = bill.id
+    ctx.user_data["bill"] = {"vendor_name": "DSTV", "amount": 5000.0}
+
+    query = _FakeCallbackQuery(data="final_schedule")
+    result = await bc.handle_final_schedule(_FakeUpdate(query), ctx)
+
+    assert result == bc.ConversationHandler.END
+    session.refresh(bill)
+    assert bill.status == "scheduled"
+
+
+def test_schedule_bill_applies_recurrence_when_a_destination_exists(
+    session,
+) -> None:
+    from datetime import datetime as _dt
+
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="choice6@x.com")
+    bill = Bill(
+        user_id=user.id,
+        vendor_name="DSTV",
+        amount=5000,
+        currency="NGN",
+        due_date=_dt.now() + timedelta(days=10),
+        account_number="0123456789",
+        bank_code="058",
+        status="pending",
+    )
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+
+    _amount, _due, applied, requested = bc._schedule_bill(
+        bill.id,
+        {
+            "recurrence_interval": "monthly",
+            "account_number": "0123456789",
+            "bank_code": "058",
+        },
+    )
+
+    assert applied == "monthly"
+    assert requested == "monthly"
+    session.refresh(bill)
+    assert bill.status == "scheduled"
+    assert bill.is_recurring is True
+    assert bill.recurrence_interval == "monthly"
+    assert bill.next_recurrence_date is not None
+
+
+def test_schedule_bill_skips_recurrence_without_a_destination(session) -> None:
+    from datetime import datetime as _dt
+
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="choice7@x.com")
+    bill = Bill(
+        user_id=user.id,
+        vendor_name="DSTV",
+        amount=5000,
+        currency="NGN",
+        due_date=_dt.now() + timedelta(days=10),
+        status="pending",
+    )
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+
+    _amount, _due, applied, requested = bc._schedule_bill(
+        bill.id, {"recurrence_interval": "monthly"}
+    )
+
+    assert applied is None
+    assert requested == "monthly"
+    session.refresh(bill)
+    assert bill.status == "scheduled"
+    assert bill.is_recurring is False

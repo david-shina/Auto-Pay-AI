@@ -42,6 +42,38 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def payment_choice_keyboard(
+    *,
+    amount_label: str,
+    due_label: str,
+    allow_pay_now: bool = True,
+) -> InlineKeyboardMarkup:
+    """Explicit "what do you want to do" choice for a bill.
+
+    The agent only *recommends*; paying money requires this tap. Labels
+    carry the human-readable amount/date while the callback data stays
+    constant (Telegram caps callback_data at 64 bytes).
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if allow_pay_now:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    f"Pay now {amount_label}", callback_data="final_pay"
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                f"Schedule for {due_label}", callback_data="final_schedule"
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton("Cancel", callback_data="final_cancel")])
+    return InlineKeyboardMarkup(rows)
+
+
 def field_keyboard() -> InlineKeyboardMarkup:
     """Legacy single-column field picker. Kept for the conversation
     state's pattern compatibility; the new multi-field editor uses
@@ -284,5 +316,6 @@ __all__ = [
     "get_user_va",
     "multi_field_editor_keyboard",
     "parse_user_date",
+    "payment_choice_keyboard",
     "safe_edit",
 ]
