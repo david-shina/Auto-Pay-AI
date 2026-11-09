@@ -1247,3 +1247,78 @@ def test_schedule_bill_skips_recurrence_without_a_destination(session) -> None:
     session.refresh(bill)
     assert bill.status == "scheduled"
     assert bill.is_recurring is False
+
+
+# ── Regression: the "Account number is invalid" attempt ────────────
+
+
+def test_cancel_persisted_bill_commits(session) -> None:
+    """A failed resolve must not leave a half-created pending bill.
+
+    `session_scope()` does not commit, so the status flip used to be
+    rolled back and the bill stayed pending forever.
+    """
+    from sqlmodel import Session
+
+    from app.core.database import engine
+    from app.handlers import bill_conversation as bc
+    from app.models.bill import Bill
+
+    user = _link_user_sync(session, email="cancel1@x.com")
+    bill = Bill(
+        user_id=user.id,
+        vendor_name="DSTV",
+        amount=5000,
+        currency="NGN",
+        due_date=datetime.now(UTC) + timedelta(days=5),
+        status="pending",
+    )
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+
+    ctx = _FakeContext(1)
+    ctx.user_data["bill_id"] = bill.id
+    bc._cancel_persisted_bill(ctx)
+
+    with Session(engine) as fresh:
+        stored = fresh.get(Bill, bill.id)
+        assert stored is not None
+        assert stored.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_receive_bill_rejects_a_one_letter_vendor(
+    session, monkeypatch
+) -> None:
+    """The extractor returned 'A' for 'Pay 20,000 to Zenith Bank'.
+    Letting it through fails later at the name-match step instead."""
+    from app.handlers import bill_conversation as bc
+    from app.schemas.bill import BillExtractionResult
+
+    _link_user_sync(session, email="tiny1@x.com", chat_id=4242)
+
+    class _Loader:
+        async def extract(self):
+            return BillExtractionResult(vendor_name="A", amount=20000)
+
+    async def _fake_build_loader(msg, context):
+        return _Loader()
+
+    monkeypatch.setattr(bc, "_build_loader", _fake_build_loader)
+
+    msg = _FakeMessage(chat_id=4242, text="Pay 20,000 to Zenith Bank")
+    update = type(
+        "U",
+        (),
+        {
+            "message": msg,
+            "effective_chat": type("C", (), {"id": 4242})(),
+        },
+    )()
+    ctx = _FakeContext(4242)
+
+    result = await bc.receive_bill(update, ctx)
+
+    assert result == bc.ConversationHandler.END
+    assert any("who" in reply.lower() for reply in msg.replies), msg.replies

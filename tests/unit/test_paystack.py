@@ -475,3 +475,20 @@ async def test_get_transfer_unknown_status() -> None:
     )
     p = _client()
     assert (await p.get_transfer(reference="ref-2")).status == "unknown"
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Invalid account number",
+        "Account number is invalid",  # the wording that reached the bot
+        "Account number is not valid",
+    ],
+)
+def test_account_number_errors_are_user_fixable(message: str) -> None:
+    """These must be a 422 ("check the account number"), not a
+    retryable 502 ("try again in a moment")."""
+    from app.services.payments.paystack import _map_paystack_error
+
+    exc = _map_paystack_error(400, {"message": message, "data": None})
+    assert isinstance(exc, InvalidAccountError)

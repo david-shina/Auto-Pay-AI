@@ -65,7 +65,7 @@ def _llm_extract(system: str, user: str) -> BillExtractionResult | None:
         return None
     try:
         result = client.chat.completions.create(
-            model="qwen/qwen3.8-27b",
+            model="openai/gpt-oss-120b",
             response_model=BillExtractionResult,
             messages=[
                 {"role": "system", "content": system},
@@ -326,7 +326,10 @@ class TextLoader(BaseLoader):
             system=(
                 "You are a financial assistant. Extract bill or payment "
                 "details from the user's message. If a piece of info is "
-                "missing, leave it null. Today's date is "
+                "missing, leave it null. `vendor_name` must be the company "
+                "or service being paid (e.g. 'DSTV', 'MTN', 'EKEDC') - "
+                "never a single letter, a person's name, or the bank name; "
+                "leave it empty if you cannot tell. Today's date is "
                 f"{__import__('datetime').date.today().isoformat()} — use "
                 "it to resolve relative dates like 'next Friday'. "
                 "For the `due_date` field, ALWAYS return an ISO 8601 date "

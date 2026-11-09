@@ -126,6 +126,18 @@ async def receive_bill(
         )
         return ConversationHandler.END
 
+    # A one- or two-letter "vendor" (e.g. "A") is an extraction failure,
+    # not a bill. Letting it through fails later, at the account-name
+    # match, with a message that looks unrelated to what the user typed.
+    if len((extracted.vendor_name or "").strip()) < 3:
+        await msg.reply_text(
+            "🤔 I couldn't tell *who* this bill is for.\n\n"
+            "Send it again with the company name, e.g.:\n"
+            "`Pay DSTV 5000 by Friday 0123456789 GTBank 058`",
+            parse_mode="Markdown",
+        )
+        return ConversationHandler.END
+
     # Stash for downstream steps. The conversation keeps a `staging`
     # copy so the user can discard their changes; the canonical
     # `bill` dict is only mutated when they tap "Done editing".
@@ -386,6 +398,10 @@ def _cancel_persisted_bill(context: ContextTypes.DEFAULT_TYPE) -> None:
             if bill and bill.status == BillStatus.PENDING.value:
                 bill.status = BillStatus.CANCELLED.value
                 session.add(bill)
+                # `session_scope()` does not commit; without this the
+                # status flip is rolled back and the half-created bill is
+                # left `pending` forever.
+                session.commit()
     except Exception as exc:
         logger.warning("could not cancel bill %d: %s", bill_id, exc)
     context.user_data.clear()

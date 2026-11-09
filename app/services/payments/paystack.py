@@ -85,13 +85,20 @@ def _map_paystack_error(status_code: int, body: dict) -> PaymentError:
     # Bank-code problems are the user's to fix (wrong or unknown bank),
     # so they must surface as a 422 rather than a retryable 502. Paystack
     # phrases these as "Unknown bank code", "Invalid bank code", or
-    # "Could not find bank". Before this branch existed they fell through
-    # to `ProviderError`, and the bot printed the raw text to the user -
-    # which is where the "Unknown bank code" report came from.
-    if "bank code" in message.lower() or "find bank" in message.lower():
+    # "Could not find bank".
+    lowered = message.lower()
+    if "bank code" in lowered or "find bank" in lowered:
         return InvalidAccountError(message, provider="paystack", raw=raw)
 
-    if "resolve" in message.lower() or "invalid account" in message.lower():
+    # Account-number problems are equally user-fixable. Paystack words
+    # them inconsistently - "Invalid account number" and "Account number
+    # is invalid" both occur - so match on the words rather than one
+    # phrase. Missing this sent "Account number is invalid" to the
+    # generic branch, and the user was told to "try again in a moment",
+    # which could never help.
+    if "resolve" in lowered or "invalid account" in lowered or (
+        "account" in lowered and ("invalid" in lowered or "not valid" in lowered)
+    ):
         return InvalidAccountError(message, provider="paystack", raw=raw)
 
     return ProviderError(message, provider="paystack", raw=raw)
