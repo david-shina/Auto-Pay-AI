@@ -168,6 +168,19 @@ def confirm_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def _cancel_keyboard() -> InlineKeyboardMarkup:
+    """A lone Cancel button for the typed-input steps.
+
+    The inline keyboards (bank, date, recurrence, confirm) each carry
+    their own Cancel, but the plain text prompts had nothing - halfway
+    through the flow the only way out was knowing to type /cancel.
+    Every prompt in a typed state now offers the button too.
+    """
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel", callback_data="sch_cancel")]]
+    )
+
+
 # ── Step 0: /schedule entry point ──────────────────────────────────
 
 
@@ -194,8 +207,10 @@ async def schedule_command(
         "If you mark it as recurring, I'll create a new occurrence "
         "automatically after each successful payment.\n\n"
         "*Step 1/6 — Vendor name*\n"
-        "Who's the bill for? (e.g. `DSTV`, `EKEDC`, `MTN`)",
+        "Who's the bill for? (e.g. `DSTV`, `EKEDC`, `MTN`)\n\n"
+        "_Tap Cancel (or send /cancel) at any step to stop._",
         parse_mode="Markdown",
+        reply_markup=_cancel_keyboard(),
     )
     return SCH_VENDOR
 
@@ -217,6 +232,7 @@ async def handle_vendor(
         await update.message.reply_text(
             "⚠️ Vendor name must be 1–255 characters. Try again:",
             parse_mode="Markdown",
+            reply_markup=_cancel_keyboard(),
         )
         return SCH_VENDOR
     context.user_data["sch"]["vendor_name"] = vendor
@@ -226,6 +242,7 @@ async def handle_vendor(
         f"*Step 2/6 — Amount*\n"
         f"How much is the bill? (e.g. `5000` or `12,500.50`)",
         parse_mode="Markdown",
+        reply_markup=_cancel_keyboard(),
     )
     return SCH_AMOUNT
 
@@ -246,12 +263,14 @@ async def handle_amount(
             f"⚠️ *{escape_md(text)}* isn't a valid amount.\n\n"
             f"Try again (e.g. `5000` or `12,500.00`):",
             parse_mode="Markdown",
+            reply_markup=_cancel_keyboard(),
         )
         return SCH_AMOUNT
     if amount < 100 or amount > 10_000_000:
         await update.message.reply_text(
             "⚠️ Amount must be between ₦100 and ₦10,000,000.\n\nTry again:",
             parse_mode="Markdown",
+            reply_markup=_cancel_keyboard(),
         )
         return SCH_AMOUNT
 
@@ -262,6 +281,7 @@ async def handle_amount(
         f"*Step 3/6 — Account number*\n"
         f"What's the destination account number? (10–11 digits)",
         parse_mode="Markdown",
+        reply_markup=_cancel_keyboard(),
     )
     return SCH_ACCOUNT
 
@@ -278,6 +298,7 @@ async def handle_account(
         await update.message.reply_text(
             "⚠️ Account number must be 10 or 11 digits. Try again:",
             parse_mode="Markdown",
+            reply_markup=_cancel_keyboard(),
         )
         return SCH_ACCOUNT
     context.user_data["sch"]["account_number"] = text
@@ -328,6 +349,7 @@ async def handle_bank_other(
         "For example `GTBank`, `Access Bank`, `UBA`, or the numeric code "
         "`058`. If several banks match, I'll show you the options.",
         parse_mode="Markdown",
+        reply_markup=_cancel_keyboard(),
     )
     return SCH_BANK  # stay in this state; typed input goes to handle_bank_typed
 
@@ -348,6 +370,9 @@ def _bank_choice_keyboard(matches: list) -> InlineKeyboardMarkup:
         ]
         for m in matches
     ]
+    rows.append(
+        [InlineKeyboardButton("❌ Cancel", callback_data="sch_cancel")]
+    )
     return InlineKeyboardMarkup(rows)
 
 
@@ -364,7 +389,10 @@ async def handle_bank_typed(
     context.user_data.setdefault("sch", {})
     text = (update.message.text or "").strip()
     if not text:
-        await update.message.reply_text("⚠️ Type a bank name or code:")
+        await update.message.reply_text(
+            "⚠️ Type a bank name or code:",
+            reply_markup=_cancel_keyboard(),
+        )
         return SCH_BANK
 
     from app.services.banks import get_bank_directory

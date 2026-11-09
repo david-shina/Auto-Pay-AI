@@ -56,14 +56,17 @@ class _FakeMessage:
         self.text = text
         self.replies: list[str] = []
         self.edits: list[str] = []
+        self.markups: list = []
         self.photo = None
         self.document = None
 
     async def reply_text(self, text, **kwargs):
         self.replies.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
 
     async def edit_message_text(self, text, **kwargs):
         self.edits.append(text)
+        self.markups.append(kwargs.get("reply_markup"))
 
 
 class _FakeCallbackQuery:
@@ -522,3 +525,90 @@ async def test_handle_cancel_clears_state() -> None:
     result = await handle_cancel(update, ctx)
     assert result == ConversationHandler.END
     assert "sch" not in ctx.user_data
+
+
+# ── Cancel affordance in the typed steps ───────────────────────────
+
+
+def _has_cancel(markup) -> bool:
+    if markup is None:
+        return False
+    return any(
+        button.callback_data == "sch_cancel"
+        for row in markup.inline_keyboard
+        for button in row
+    )
+
+
+@pytest.mark.asyncio
+async def test_schedule_entry_prompt_offers_cancel(session) -> None:
+    """/schedule used to answer with plain text, so there was no visible
+    way out until the bank step."""
+    from app.handlers.schedule_conversation import schedule_command
+
+    _link_user(session, email="cancel-entry@x.com", chat_id=300020)
+    msg = _FakeMessage(chat_id=300020)
+    update = type(
+        "U",
+        (),
+        {"message": msg, "effective_chat": type("C", (), {"id": 300020})()},
+    )()
+
+    await schedule_command(update, _FakeContext())
+
+    assert _has_cancel(msg.markups[-1])
+
+
+@pytest.mark.asyncio
+async def test_typed_steps_offer_cancel() -> None:
+    from app.handlers import schedule_conversation as sc
+
+    ctx = _FakeContext()
+    ctx.user_data["sch"] = {}
+
+    # Vendor typed -> amount prompt.
+    msg = _FakeMessage(300021, text="DSTV")
+    await sc.handle_vendor(type("U", (), {"message": msg})(), ctx)
+    assert _has_cancel(msg.markups[-1])
+
+    # Amount typed -> account prompt.
+    msg = _FakeMessage(300021, text="5000")
+    await sc.handle_amount(type("U", (), {"message": msg})(), ctx)
+    assert _has_cancel(msg.markups[-1])
+
+
+@pytest.mark.asyncio
+async def test_validation_retries_offer_cancel() -> None:
+    from app.handlers import schedule_conversation as sc
+
+    ctx = _FakeContext()
+    ctx.user_data["sch"] = {}
+
+    msg = _FakeMessage(300022, text="   ")  # invalid vendor
+    await sc.handle_vendor(type("U", (), {"message": msg})(), ctx)
+    assert _has_cancel(msg.markups[-1])
+
+    msg = _FakeMessage(300022, text="abc")  # invalid amount
+    await sc.handle_amount(type("U", (), {"message": msg})(), ctx)
+    assert _has_cancel(msg.markups[-1])
+
+    msg = _FakeMessage(300022, text="123")  # invalid account
+    await sc.handle_account(type("U", (), {"message": msg})(), ctx)
+    assert _has_cancel(msg.markups[-1])
+
+
+@pytest.mark.asyncio
+async def test_cancel_button_ends_the_flow() -> None:
+    from app.handlers import schedule_conversation as sc
+
+    ctx = _FakeContext()
+    ctx.user_data["sch"] = {"vendor_name": "DSTV"}
+    query = _FakeCallbackQuery(data="sch_cancel", chat_id=300023)
+
+    result = await sc.handle_cancel(
+        type("U", (), {"callback_query": query})(), ctx
+    )
+
+    assert result == sc.ConversationHandler.END
+    assert "sch" not in ctx.user_data
+    assert any("cancelled" in edit.lower() for edit in query.edits)
