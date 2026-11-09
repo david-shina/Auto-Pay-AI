@@ -1322,3 +1322,56 @@ async def test_receive_bill_rejects_a_one_letter_vendor(
 
     assert result == bc.ConversationHandler.END
     assert any("who" in reply.lower() for reply in msg.replies), msg.replies
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "/link",
+        "/unlink",
+        "/wallet",
+        "/topup",
+        "/schedule",
+        "/bills",
+        "/transactions",
+        "/otp",
+        "/cancel",
+        "/help",
+        "/start",
+    ],
+)
+@pytest.mark.asyncio
+async def test_start_explains_every_command(command: str) -> None:
+    """`/start` is the discovery surface: every command the bot registers
+    must appear there with an explanation."""
+    from app.handlers.auth import start_command
+
+    msg = _FakeMessage(chat_id=60000)
+    update = type(
+        "U",
+        (),
+        {"message": msg, "effective_chat": type("C", (), {"id": 60000})()},
+    )()
+
+    await start_command(update, _FakeContext(60000))
+
+    body = "\n".join(msg.replies)
+    assert command in body, f"{command} missing from /start"
+
+
+@pytest.mark.asyncio
+async def test_start_mentions_the_payout_fee() -> None:
+    from app.core.config import settings
+    from app.handlers.auth import start_command
+
+    msg = _FakeMessage(chat_id=60001)
+    update = type(
+        "U",
+        (),
+        {"message": msg, "effective_chat": type("C", (), {"id": 60001})()},
+    )()
+
+    await start_command(update, _FakeContext(60001))
+
+    body = "\n".join(msg.replies)
+    assert f"{float(settings.payout_fee_ngn):,.0f}" in body

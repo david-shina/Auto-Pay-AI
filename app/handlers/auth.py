@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.core.config import settings
 from app.core.database import session_scope
 from app.handlers.helpers import (
     escape_md,
@@ -33,17 +34,35 @@ logger = logging.getLogger(__name__)
 # ── /start ──────────────────────────────────────────────────────────
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    fee = float(settings.payout_fee_ngn)
     msg = (
-        "👋 *Welcome to AutoPay AI!*\n\n"
-        "I pay your bills automatically. Send me a bill photo, PDF, or\n"
-        "text description and I'll handle the rest.\n\n"
-        "*Get started:*\n"
+        "👋 *Welcome to AutoPay AI*\n\n"
+        "I pay your bills from your wallet — automatically on the due "
+        "date, or immediately if you ask.\n\n"
+        "*Getting started*\n"
         "1. Sign up at the web dashboard.\n"
-        "2. Open Settings → Link Telegram — copy the 6-char code.\n"
-        f"3. Send it here: `/link {chr(60)}CODE{chr(62)}`\n\n"
-        "Once linked, send me a bill whenever a payment is due.\n\n"
-        "*Try:* `/topup`, `/schedule`, `/wallet`, `/bills`, "
-        "`/transactions`, `/help`"
+        "2. Open Settings → Link Telegram and copy the 6-character code.\n"
+        "3. Send it here: `/link ABC123`\n"
+        "4. Send me a bill — photo, PDF, or text. I'll extract the "
+        "details and let you choose *Pay now* or *Schedule*.\n\n"
+        "*Commands*\n"
+        "/link `<code>` — connect this chat to your AutoPay account\n"
+        "/unlink — disconnect this chat from your account\n"
+        "/wallet — show your balance and virtual account details\n"
+        "/topup — add money to your wallet (card, bank transfer, USSD)\n"
+        "/schedule — set up a future-dated or recurring bill, step by step\n"
+        "/bills — list your recent bills and their status\n"
+        "/transactions — show recent credits and debits\n"
+        "/otp `<code>` — approve a transfer Paystack is holding for an OTP\n"
+        "/cancel — stop whatever you're in the middle of\n"
+        "/help — the short command list\n"
+        "/start — show this message again\n\n"
+        "*Good to know*\n"
+        f"• Scheduled bills are paid automatically on their due date.\n"
+        f"• A payout needs enough balance for the bill plus the "
+        f"₦{fee:,.0f} fee.\n"
+        "• If the bank can't verify an account, you'll be asked to fix "
+        "it before anything is charged."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -370,6 +389,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/transactions — show recent credits and debits\n"
         "/otp `<code>` — approve a transfer Paystack is holding for OTP\n"
         "/cancel — cancel the current conversation\n\n"
+        "Send /start for a one-line explanation of what each command does.\n"
         "Just send a bill photo, PDF, or text to pay a bill."
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
