@@ -237,6 +237,12 @@ def test_real_jobs_are_registered_with_the_shape_they_expect() -> None:
     assert __import__("inspect").iscoroutinefunction(
         scheduler_module._refresh_banks
     )
+    assert __import__("inspect").iscoroutinefunction(
+        scheduler_module._reconcile_processing_transfers
+    )
+    assert __import__("inspect").iscoroutinefunction(
+        scheduler_module._resolve_stale_pending_bills
+    )
 
 
 def test_scheduler_jobs_are_skipped_when_disabled(

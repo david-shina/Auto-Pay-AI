@@ -109,6 +109,17 @@ def start_scheduler() -> None:
         max_instances=1,
         coalesce=True,
     )
+    _scheduler.add_job(
+        _run_sync_in_private_loop(
+            "resolve_stale_pending_bills", _resolve_stale_pending_bills
+        ),
+        trigger=IntervalTrigger(hours=1),
+        id="resolve_stale_pending_bills",
+        name="Schedule or expire bills left undecided",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     try:
         _scheduler.start()
         logger.info("Scheduler started: %s", [j.id for j in _scheduler.get_jobs()])
@@ -350,6 +361,173 @@ async def _reconcile_processing_transfers() -> None:
             logger.exception(
                 "reconcile.transfer.error txn_id=%s err=%s", txn_id, exc
             )
+
+
+# ── Stale pending bills ─────────────────────────────────────────────
+# A bill created with no explicit intent waits in `pending` for the user
+# to choose pay-now or schedule. If they never choose it must not sit
+# there forever - but it must never be paid without consent either. So
+# the sweep only takes money-safe actions: schedule (defers, moves
+# nothing now) or cancel.
+
+_PENDING_NUDGE_AFTER = timedelta(hours=24)
+_PENDING_EXPIRE_AFTER = timedelta(days=7)
+# Scheduling a bill that is already due would be claimed by the payer on
+# its next tick, i.e. an unapproved payment. Require real lead time.
+_AUTO_SCHEDULE_MIN_LEAD = timedelta(hours=1)
+
+
+async def _resolve_stale_pending_bills() -> None:
+    """Give bills stuck in `pending` a money-safe destiny.
+
+    For every pending bill older than the nudge window:
+
+      * the agent recommends schedule, the bill has a payout destination
+        and it is not due yet  -> set it `scheduled` (no money moves now);
+      * otherwise             -> notify the user once;
+      * older than the expiry window -> cancel and audit.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+
+    from sqlalchemy import select as _sa_select
+
+    from app.agents.nodes import decide
+    from app.agents.state import Decision
+    from app.core.config import settings
+    from app.core.database import session_scope
+    from app.models.audit_log import AuditLog
+    from app.models.bill import Bill
+    from app.models.enums import (
+        AuditActor,
+        AuditEntityType,
+        AuditEventType,
+        BillStatus,
+    )
+    from app.models.user import User
+    from app.services.audit import write_audit
+    from app.services.date_parser import days_until
+    from app.services.telegram import notify_decision_needed
+
+    now = datetime.now()
+
+    with session_scope() as session:
+        candidates = session.exec(
+            _sa_select(Bill.id)
+            .where(
+                Bill.status == BillStatus.PENDING.value,
+                Bill.created_at <= now - _PENDING_NUDGE_AFTER,
+            )
+            .order_by(Bill.created_at.asc())
+            .limit(100)
+            .with_for_update(skip_locked=True)
+        ).scalars().all()
+        # Release the locks; each bill is re-read below.
+        session.commit()
+
+    if not candidates:
+        return
+
+    for bill_id in candidates:
+        with session_scope() as session:
+            bill = session.get(Bill, bill_id)
+            if bill is None or bill.status != BillStatus.PENDING.value:
+                continue
+            user = session.get(User, bill.user_id)
+            if user is None:  # pragma: no cover - FK guarantees this
+                continue
+
+            age = _age_of(bill.created_at)
+
+            # 1. Past the expiry window -> cancel. No money has moved.
+            if age >= _PENDING_EXPIRE_AFTER:
+                bill.status = BillStatus.CANCELLED.value
+                write_audit(
+                    session,
+                    actor=AuditActor.SCHEDULER,
+                    event_type=AuditEventType.BILL_CANCELLED,
+                    user_id=user.id,
+                    entity_type=AuditEntityType.BILL,
+                    entity_id=bill.id,
+                    metadata={
+                        "reason": "no_decision",
+                        "age_hours": int(age.total_seconds() // 3600),
+                    },
+                )
+                session.commit()
+                record_scheduler_job(
+                    job_id="resolve_stale_pending_bills", result="expired"
+                )
+                logger.info("stale_pending.cancelled bill_id=%d", bill.id)
+                continue
+
+            decision = decide(
+                user_balance=Decimal(str(user.balance)),
+                bill_amount=Decimal(str(bill.amount)),
+                fee=Decimal(str(settings.payout_fee_ngn)),
+                days_until_due=days_until(bill.due_date),
+            )
+
+            # 2. Safe default: defer. Only when the agent would schedule,
+            #    the bill has somewhere to pay to, and it is not due yet.
+            lead = -_age_of(bill.due_date)  # positive when due in the future
+            if (
+                decision.decision == Decision.SCHEDULE
+                and bill.account_number
+                and bill.bank_code
+                and lead > _AUTO_SCHEDULE_MIN_LEAD
+            ):
+                bill.status = BillStatus.SCHEDULED.value
+                session.add(bill)
+                write_audit(
+                    session,
+                    actor=AuditActor.SCHEDULER,
+                    event_type=AuditEventType.BILL_SCHEDULED,
+                    user_id=user.id,
+                    entity_type=AuditEntityType.BILL,
+                    entity_id=bill.id,
+                    metadata={
+                        "reason": "auto_scheduled_after_inactivity",
+                        "due_date": bill.due_date.isoformat(),
+                    },
+                )
+                session.commit()
+                record_scheduler_job(
+                    job_id="resolve_stale_pending_bills", result="scheduled"
+                )
+                logger.info("stale_pending.scheduled bill_id=%d", bill.id)
+                continue
+
+            # 3. Cannot decide for them -> notify once, then leave it to
+            #    the expiry branch above. The audit row is both the log
+            #    and the "already nudged" marker, so no schema change.
+            already_nudged = session.exec(
+                _sa_select(AuditLog.id)
+                .where(
+                    AuditLog.event_type
+                    == AuditEventType.BILL_DECISION_NUDGE.value,
+                    AuditLog.entity_id == bill.id,
+                )
+                .limit(1)
+            ).first()
+            if already_nudged is not None:
+                continue
+
+            await notify_decision_needed(user=user, bill=bill)
+            write_audit(
+                session,
+                actor=AuditActor.SCHEDULER,
+                event_type=AuditEventType.BILL_DECISION_NUDGE,
+                user_id=user.id,
+                entity_type=AuditEntityType.BILL,
+                entity_id=bill.id,
+                metadata={"due_date": bill.due_date.isoformat()},
+            )
+            session.commit()
+            record_scheduler_job(
+                job_id="resolve_stale_pending_bills", result="nudged"
+            )
+            logger.info("stale_pending.nudged bill_id=%d", bill.id)
 
 
 def _claim_due_scheduled_bill_ids(session) -> list[int]:

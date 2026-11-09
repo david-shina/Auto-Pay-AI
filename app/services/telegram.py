@@ -53,6 +53,7 @@ from app.handlers.schedule_conversation import build_schedule_conversation
 from app.handlers.topup_conversation import build_topup_conversation
 
 if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from app.models.bill import Bill
     from app.models.transaction import Transaction
     from app.models.user import User
 
@@ -393,3 +394,49 @@ async def notify_refund(*, user: User, transaction: Transaction) -> bool:
     return await notify_user_of_transaction(
         user=user, transaction=transaction, kind="refund",
     )
+
+
+async def notify_decision_needed(*, user: User, bill: Bill) -> bool:
+    """Nudge the user about a bill that is waiting for a decision.
+
+    Sent at most once per bill by the stale-pending sweep. Nothing has
+    been paid or scheduled at this point - the user still has to choose.
+    """
+    if _application is None:
+        logger.debug("notify_decision_needed: bot not running; skipping")
+        return False
+    if not getattr(user, "is_telegram_linked", False) or not getattr(
+        user, "telegram_chat_id", None
+    ):
+        logger.debug(
+            "notify_decision_needed: user %d not linked; skipping", user.id
+        )
+        return False
+
+    amount = _format_amount(bill.amount)
+    due = bill.due_date.date().isoformat() if bill.due_date else "soon"
+    text = "\n".join(
+        [
+            "⏳ *Action needed*",
+            "",
+            f"Your bill of *{amount}* to {escape_md(bill.vendor_name)} is "
+            f"waiting for a decision.",
+            f"Due: {due}",
+            "",
+            "Pay it now or schedule it from the dashboard, or send /bills.",
+        ]
+    )
+
+    try:
+        await _application.bot.send_message(
+            chat_id=user.telegram_chat_id,
+            text=text,
+            parse_mode="Markdown",
+            reply_markup=_notify_keyboard(),
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "notify_decision_needed failed for user %d: %s", user.id, exc
+        )
+        return False

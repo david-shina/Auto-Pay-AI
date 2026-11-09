@@ -62,6 +62,8 @@ class AuditEventType(str, Enum):
     BILL_FAILED = "bill.failed"
     BILL_CANCELLED = "bill.cancelled"
     BILL_RECURRENCE_CREATED = "bill.recurrence_created"
+    # Written by the stale-pending sweep so a bill is nudged at most once.
+    BILL_DECISION_NUDGE = "bill.decision_nudge"
 
     # Virtual accounts
     VA_CREATED = "va.created"
