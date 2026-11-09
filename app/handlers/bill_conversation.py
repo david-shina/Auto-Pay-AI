@@ -131,8 +131,8 @@ async def receive_bill(
     # match, with a message that looks unrelated to what the user typed.
     if len((extracted.vendor_name or "").strip()) < 3:
         await msg.reply_text(
-            "🤔 I couldn't tell *who* this bill is for.\n\n"
-            "Send it again with the company name, e.g.:\n"
+            "🤔 I couldn't tell *who should receive the money*.\n\n"
+            "Send it again naming the person or company being paid, e.g.:\n"
             "`Pay DSTV 5000 by Friday 0123456789 GTBank 058`",
             parse_mode="Markdown",
         )

@@ -395,3 +395,78 @@ def test_extraction_defaults_sit_at_ask() -> None:
     result = BillExtractionResult(vendor_name="X", amount=1)
     assert result.intent == "ask"
     assert result.recurrence_interval is None
+
+
+# ── Backstop: fill fields the model left empty ─────────────────────
+
+SENTENCE = (
+    "Pay 20,000 to Test Bank account number 0000000000, "
+    "for David Shina-Ayomi Arinde"
+)
+
+
+def test_regex_extract_handles_a_transfer_sentence() -> None:
+    """The exact phrasing that used to fail extraction."""
+    result = loaders._regex_extract(SENTENCE)
+
+    assert result.vendor_name == "David Shina-Ayomi Arinde"
+    assert result.amount == 20000.0
+    assert result.account_number == "0000000000"
+    assert result.bank_name == "Test Bank"
+
+
+def test_fill_missing_adds_vendor_bank_and_account() -> None:
+    result = BillExtractionResult(vendor_name="", amount=20000)
+
+    filled = loaders._fill_missing_from_text(result, SENTENCE)
+
+    assert filled.vendor_name == "David Shina-Ayomi Arinde"
+    assert filled.bank_name == "Test Bank"
+    assert filled.account_number == "0000000000"
+
+
+def test_fill_missing_preserves_leading_zeros() -> None:
+    result = BillExtractionResult(vendor_name="X", amount=1)
+
+    filled = loaders._fill_missing_from_text(
+        result, "Pay 500 to GTBank account 0000123456"
+    )
+
+    # Never coerced to an int: the leading zeros are part of the number.
+    assert filled.account_number == "0000123456"
+
+
+def test_fill_missing_never_overwrites_the_model() -> None:
+    result = BillExtractionResult(
+        vendor_name="DSTV",
+        amount=5000,
+        account_number="9999999999",
+        bank_name="Access Bank",
+    )
+
+    filled = loaders._fill_missing_from_text(result, SENTENCE)
+
+    assert filled.vendor_name == "DSTV"
+    assert filled.account_number == "9999999999"
+    assert filled.bank_name == "Access Bank"
+
+
+def test_fill_missing_ignores_lowercase_after_for() -> None:
+    result = BillExtractionResult(vendor_name="", amount=100)
+
+    filled = loaders._fill_missing_from_text(
+        result, "Pay 100 for the month of May"
+    )
+
+    assert filled.vendor_name == ""
+
+
+def test_fill_missing_does_not_treat_a_person_as_the_bank() -> None:
+    result = BillExtractionResult(vendor_name="David", amount=100)
+
+    filled = loaders._fill_missing_from_text(
+        result, "Send 100 to David at GTBank account 0123456789"
+    )
+
+    # "to David at GTBank account" would capture the person; skip it.
+    assert filled.bank_name is None

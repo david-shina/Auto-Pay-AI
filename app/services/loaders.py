@@ -23,6 +23,7 @@ import base64
 import logging
 import re
 from abc import ABC, abstractmethod
+from datetime import date
 from typing import ClassVar, Final, Literal
 
 from app.core.config import settings
@@ -32,8 +33,32 @@ logger = logging.getLogger(__name__)
 
 # A rough match for "₦12,345.67" or "NGN 12,345.67"
 _AMOUNT_RE = re.compile(r"(?:[₦N]|NGN)\s*([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
+# "Pay 20,000 to ..." has no currency prefix. Kept separate so a
+# prefixed match (N 5,000 / ₦5,000 / NGN 5000) still wins.
+_PAY_AMOUNT_RE = re.compile(
+    r"\b(?:pay|send|transfer)\s+(?:₦|N|NGN)?\s*([\d,]+(?:\.\d{1,2})?)",
+    re.IGNORECASE,
+)
 _DATE_RE = re.compile(
     r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b"
+)
+
+# Targeted patterns used as a *backstop*: they only fill fields the model
+# left empty, never override it. Phrasings like "Pay 20,000 to Test Bank
+# account number 0000000000 for David" are common and the model drops
+# one of the three identifiers often enough to matter.
+_ACCOUNT_RE = re.compile(
+    r"\b(?:account|acct)(?:\s*(?:number|no\.?))?\s*[:#-]?\s*(\d{6,})",
+    re.IGNORECASE,
+)
+_TO_BANK_RE = re.compile(
+    r"\bto\s+(.+?)\s+(?:account|acct)\b",
+    re.IGNORECASE,
+)
+_FOR_NAME_RE = re.compile(
+    r"\b(?:for|beneficiary)\s+"
+    r"([A-Za-z][A-Za-z'\u2019.\-]*(?:\s+[A-Za-z][A-Za-z'\u2019.\-]*){0,5})",
+    re.IGNORECASE,
 )
 
 
@@ -67,6 +92,12 @@ def _llm_extract(system: str, user: str) -> BillExtractionResult | None:
         result = client.chat.completions.create(
             model="openai/gpt-oss-120b",
             response_model=BillExtractionResult,
+            # Deterministic: the same message must always extract the
+            # same fields. Without this, identical input flipped between
+            # an empty vendor and a populated one (and between 'ask' and
+            # 'pay_now'), which looked like random failures.
+            temperature=0,
+            top_p=1,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -232,6 +263,43 @@ def _apply_intent_fallback(
     )
 
 
+def _fill_missing_from_text(
+    result: BillExtractionResult, text: str
+) -> BillExtractionResult:
+    """Fill fields the extractor left empty using targeted patterns.
+
+    Only ever *adds* - a value the model produced is never overwritten.
+    That keeps the fallback safe: worst case it contributes nothing.
+    """
+    updates: dict[str, str] = {}
+
+    if not (result.account_number or "").strip():
+        match = _ACCOUNT_RE.search(text)
+        if match:
+            updates["account_number"] = match.group(1)
+
+    if not (result.bank_name or "").strip() and not (result.bank_code or "").strip():
+        match = _TO_BANK_RE.search(text)
+        if match:
+            name = match.group(1).strip(" ,.;:")
+            # "to David at GTBank account ..." would capture the person,
+            # not the bank; leave it for the model instead.
+            if 3 <= len(name) <= 64 and " at " not in name.lower():
+                updates["bank_name"] = name
+
+    if len((result.vendor_name or "").strip()) < 3:
+        match = _FOR_NAME_RE.search(text)
+        if match:
+            name = match.group(1).strip(" ,.;:")
+            # A recipient is a proper noun; "for the month" is not.
+            if len(name) >= 3 and name[:1].isupper():
+                updates["vendor_name"] = name
+
+    if not updates:
+        return result
+    return result.model_copy(update=updates)
+
+
 def _regex_extract(text: str) -> BillExtractionResult:
     """Best-effort bill extraction when no LLM is available.
 
@@ -239,13 +307,14 @@ def _regex_extract(text: str) -> BillExtractionResult:
     (via `_detect_vendor`). The biller keyword list covers the top
     Nigerian billers; arbitrary vendor names still require the LLM.
     """
-    amount_match = _AMOUNT_RE.search(text)
+    amount_match = _AMOUNT_RE.search(text) or _PAY_AMOUNT_RE.search(text)
     amount = float(amount_match.group(1).replace(",", "")) if amount_match else 0.0
     result = BillExtractionResult(
         vendor_name=_detect_vendor(text),
         amount=amount,
         raw_text=text,
     )
+    result = _fill_missing_from_text(result, text)
     return _apply_intent_fallback(result, text)
 
 
@@ -322,31 +391,51 @@ class TextLoader(BaseLoader):
         self.text = text
 
     async def extract(self) -> BillExtractionResult:
+        today = date.today().isoformat()
         result = _llm_extract(
             system=(
-                "You are a financial assistant. Extract bill or payment "
-                "details from the user's message. If a piece of info is "
-                "missing, leave it null. `vendor_name` must be the company "
-                "or service being paid (e.g. 'DSTV', 'MTN', 'EKEDC') - "
-                "never a single letter, a person's name, or the bank name; "
-                "leave it empty if you cannot tell. Today's date is "
-                f"{__import__('datetime').date.today().isoformat()} — use "
-                "it to resolve relative dates like 'next Friday'. "
-                "For the `due_date` field, ALWAYS return an ISO 8601 date "
-                "string in the form `YYYY-MM-DD` (or null if the bill "
-                "has no due date). Do not return times, timezones, or "
-                "natural-language phrases — just the bare date. "
-                "Set `intent` to 'pay_now' only if the user asks to pay "
-                "immediately ('pay now', 'today', 'asap'); to 'schedule' "
-                "if they ask to defer or give a future date ('next week', "
-                "'on the 20th', 'don't pay yet'); otherwise 'ask'. "
-                "Set `recurrence_interval` to 'monthly' or 'weekly' only "
-                "if they describe a repeating bill ('every month')."
+                "You extract payment details from a user's message and "
+                "return them in the given schema. Fill every field the "
+                "message supports; leave the rest null.\n\n"
+                "Field rules:\n"
+                "- vendor_name: WHO RECEIVES THE MONEY, company or person, "
+                "spelled as the user wrote it. 'for <name>' or 'to <name>' "
+                "names the recipient - use it verbatim. Never use the "
+                "bank's name. Never a single letter. Leave empty only if "
+                "no recipient is mentioned.\n"
+                "- account_number: digits only, exactly as written. Keep "
+                "leading zeros; never pad, round or shorten it.\n"
+                "- bank_name: the bank as written (e.g. 'GTBank', "
+                "'Test Bank').\n"
+                "- bank_code: only when the message contains a numeric "
+                "bank code.\n"
+                "- amount: NGN, numbers only - strip the naira sign and "
+                "thousands separators.\n"
+                f"- due_date: YYYY-MM-DD, or null. Resolve relative dates "
+                f"against today ({today}). Never times or phrases.\n"
+                "- intent: 'pay_now' if the user asks to pay immediately "
+                "('now', 'today', 'asap'); 'schedule' if they want it "
+                "later or give a future date ('next week', 'on the 20th'); "
+                "otherwise 'ask'.\n"
+                "- recurrence_interval: 'monthly' or 'weekly' only if the "
+                "message says it repeats ('every month').\n\n"
+                "Examples:\n"
+                "1) 'Pay DSTV 5000 by Friday' -> vendor_name='DSTV', "
+                "amount=5000, due_date=<next Friday>, intent='schedule'.\n"
+                "2) 'Send 20,000 to David at GTBank account 0123456789 "
+                "today' -> vendor_name='David', amount=20000, "
+                "bank_name='GTBank', account_number='0123456789', "
+                "intent='pay_now'.\n"
+                "3) 'Pay Test Bank account 0000000000 for David "
+                "Shina-Ayomi Arinde 20,000' -> vendor_name='David "
+                "Shina-Ayomi Arinde', amount=20000, bank_name='Test Bank', "
+                "account_number='0000000000', intent='ask'."
             ),
             user=f"Extract details from this message:\n\n{self.text}",
         )
         if result is not None:
             result.raw_text = self.text
+            result = _fill_missing_from_text(result, self.text)
             return _apply_intent_fallback(result, self.text)
         return _regex_extract(self.text)
 
@@ -398,6 +487,7 @@ class PDFLoader(BaseLoader):
         )
         if result is not None:
             result.raw_text = text
+            result = _fill_missing_from_text(result, text)
             return _apply_intent_fallback(result, text)
         return _regex_extract(text)
 
@@ -455,6 +545,8 @@ class ImageLoader(BaseLoader):
                 result = client.chat.completions.create(
                     model="qwen/qwen3.8-27b",
                     response_model=BillExtractionResult,
+                    temperature=0,
+                    top_p=1,
                     messages=[
                         {
                             "role": "user",
@@ -487,6 +579,7 @@ class ImageLoader(BaseLoader):
             )
             if result is not None:
                 result.raw_text = ocr_text
+                result = _fill_missing_from_text(result, ocr_text)
                 return _apply_intent_fallback(result, ocr_text)
 
         # ── Tier 3: local OCR → regex ──────────────────────────────
