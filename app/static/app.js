@@ -553,9 +553,9 @@ function filterBills(status, btn) {
   loadBills(status);
 }
 
-// Edit a bill that has not been paid yet. The form sends the current
-// values, so an edit is always explicit; the server rejects terminal
-// states with 409.
+// Edit a bill that has not been paid yet. Only fields the user actually
+// changed are sent: a re-sent due date would shift a day, and a re-sent
+// unresolved bank name would fail an unrelated edit.
 async function openBillEditor(billId) {
   let bill;
   try {
@@ -603,6 +603,16 @@ async function openBillEditor(billId) {
   const repeat = document.getElementById("be-repeat");
   repeat.value = bill.is_recurring ? bill.recurrence_interval || "none" : "none";
 
+  // Snapshot of the loaded values: a field equal to this is never sent.
+  const original = {
+    vendor: (bill.vendor_name || "").trim(),
+    amount: Number(bill.amount),
+    due: (bill.due_date || "").slice(0, 10),
+    account: (bill.account_number || "").trim(),
+    bank: (bill.bank_name || bill.bank_code || "").trim(),
+    repeat: bill.is_recurring ? bill.recurrence_interval || "none" : "none",
+  };
+
   const close = () => wrap.remove();
   document.getElementById("bill-editor-close").onclick = close;
   wrap.addEventListener("click", (e) => {
@@ -624,16 +634,20 @@ async function openBillEditor(billId) {
       return;
     }
 
-    const payload = {
-      vendor_name: vendor,
-      amount,
-      account_number: document.getElementById("be-account").value.trim(),
-      bank_name: document.getElementById("be-bank").value.trim(),
-      recurrence_interval: repeat.value === "none" ? null : repeat.value,
-    };
-    if (dueVal) {
-      payload.due_date = new Date(dueVal + "T00:00:00").toISOString();
+    const account = document.getElementById("be-account").value.trim();
+    const bank = document.getElementById("be-bank").value.trim();
+    const repeatVal = repeat.value === "none" ? null : repeat.value;
+
+    const payload = {};
+    if (vendor !== original.vendor) payload.vendor_name = vendor;
+    if (amount !== original.amount) payload.amount = amount;
+    if (dueVal && dueVal !== original.due) {
+      // Local wall-clock time, matching the server's "stored as local" rule.
+      payload.due_date = dueVal + "T00:00:00";
     }
+    if (account !== original.account) payload.account_number = account;
+    if (bank !== original.bank) payload.bank_name = bank;
+    if (repeatVal !== original.repeat) payload.recurrence_interval = repeatVal;
 
     btn.disabled = true;
     try {

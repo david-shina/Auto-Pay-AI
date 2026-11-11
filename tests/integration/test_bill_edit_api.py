@@ -4,12 +4,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
+from app.core.database import engine
 from app.models.bill import Bill
 from app.models.enums import BillStatus
 from app.models.user import User
+from app.services.bill import BillNotEditableError, update_bill
 
 
 def _signup(client: TestClient, session: Session, email: str, phone: str) -> tuple[str, User]:
@@ -205,7 +208,7 @@ def test_patch_terminal_bills_are_409(
         assert r.status_code == 409, (status, r.text)
 
 
-def test_editing_a_failed_bill_resets_its_retries(
+def test_editing_a_failed_bill_rearms_it(
     client: TestClient, session: Session, stub_provider
 ) -> None:
     token, _user = _signup(client, session, "edit9@x.com", "08032220009")
@@ -225,6 +228,54 @@ def test_editing_a_failed_bill_resets_its_retries(
 
     session.refresh(bill)
     assert bill.retry_count == 0
+    # Back in the scheduler's queue, otherwise nobody ever pays it.
+    assert bill.status == BillStatus.SCHEDULED.value
+
+
+def test_vendor_edit_keeps_the_recurrence_clock(
+    client: TestClient, session: Session, stub_provider
+) -> None:
+    token, _user = _signup(client, session, "edit12@x.com", "08032220012")
+    bill_id = _create_bill(client, token)
+
+    bill = session.get(Bill, bill_id)
+    advanced = (datetime.now(tz=UTC) + timedelta(days=20)).replace(microsecond=0)
+    bill.is_recurring = True
+    bill.recurrence_interval = "monthly"
+    bill.next_recurrence_date = advanced
+    session.add(bill)
+    session.commit()
+
+    r = client.patch(
+        f"/api/v1/bills/{bill_id}",
+        json={"vendor_name": "GOTV"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 200, r.text
+
+    session.refresh(bill)
+    assert bill.next_recurrence_date == advanced, (
+        "an unrelated edit must not rewind the next-recurrence date"
+    )
+
+
+def test_update_bill_rechecks_status_after_a_payment(
+    client: TestClient, session: Session, stub_provider
+) -> None:
+    """A payout can commit between the caller's read and the edit's
+    write. The shared service must re-read under a lock and refuse."""
+    token, _user = _signup(client, session, "edit13@x.com", "08032220013")
+    bill_id = _create_bill(client, token)
+
+    stale = session.get(Bill, bill_id)  # still pending in this session
+    with Session(engine) as other:
+        paid = other.get(Bill, bill_id)
+        paid.status = BillStatus.PAID.value
+        other.add(paid)
+        other.commit()
+
+    with pytest.raises(BillNotEditableError):
+        update_bill(session, bill=stale, changes={"amount": 9000})
 
 
 def test_patch_is_owner_scoped(

@@ -201,6 +201,11 @@ def update_bill(session: Session, *, bill: Bill, changes: dict) -> Bill:
     Validation happens before any mutation, so a rejected field leaves
     the bill untouched.
     """
+    # Re-read under a row lock: a payout may have claimed or paid this
+    # bill after the caller loaded it. The lock waits for that
+    # transaction, so the status check below sees the real state.
+    session.refresh(bill, with_for_update=True)
+
     if bill.status not in EDITABLE_STATUSES:
         raise BillNotEditableError(
             f"This bill can no longer be edited (status '{bill.status}'). "
@@ -261,6 +266,7 @@ def update_bill(session: Session, *, bill: Bill, changes: dict) -> Bill:
             )
     else:
         interval = bill.recurrence_interval
+    interval_changed = interval != bill.recurrence_interval
 
     # The recurrence invariant is checked against the *would-be* values.
     final_account = account_number if has_account else bill.account_number
@@ -287,14 +293,19 @@ def update_bill(session: Session, *, bill: Bill, changes: dict) -> Bill:
         bill.is_recurring = interval is not None
 
     if bill.is_recurring:
-        # Keep the next occurrence aligned with the (possibly new) date.
-        bill.next_recurrence_date = bill.due_date
+        # Only move the clock when the schedule itself changed: a
+        # vendor/amount edit must not rewind it, or the recurrence job
+        # spawns the same next bill twice.
+        if "due_date" in changes or interval_changed:
+            bill.next_recurrence_date = bill.due_date
     else:
         bill.next_recurrence_date = None
 
-    # A failed bill that the user edits deserves a fresh set of retries.
+    # A failed bill that the user edits is re-armed: fresh retries and
+    # back in the scheduler's queue so the corrected details can be paid.
     if bill.status == BillStatus.FAILED.value:
         bill.retry_count = 0
+        bill.status = BillStatus.SCHEDULED.value
 
     session.add(bill)
     session.commit()
