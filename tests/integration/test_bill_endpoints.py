@@ -173,6 +173,30 @@ def test_cancel_bill(client: TestClient, stub_provider) -> None:
     assert rc.json()["bill"]["status"] == "cancelled"
 
 
+def test_cancel_paid_bill_keeps_its_status_specific_message(
+    client: TestClient, session: Session, stub_provider
+) -> None:
+    h = _auth_header(client, email="cancel_paid@x.com", phone="08031119999")
+    r = client.post(
+        "/api/v1/bills",
+        json={
+            "vendor_name": "DSTV",
+            "amount": 5000,
+            "due_date": (datetime.now(tz=UTC) + timedelta(days=10)).isoformat(),
+        },
+        headers={"Authorization": h},
+    )
+    bill_id = r.json()["bill"]["id"]
+    bill = session.get(Bill, bill_id)
+    bill.status = BillStatus.PAID.value
+    session.add(bill)
+    session.commit()
+
+    rc = client.post(f"/api/v1/bills/{bill_id}/cancel", headers={"Authorization": h})
+    assert rc.status_code == 409, rc.text
+    assert rc.json()["detail"] == "Cannot cancel a bill in status 'paid'."
+
+
 def test_upload_text_bill_runs_agent(client: TestClient, stub_provider, session: Session) -> None:
     """The /upload endpoint with a `request_bill` form field should
     create a bill and run the decision agent."""

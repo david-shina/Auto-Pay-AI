@@ -503,8 +503,11 @@ def cancel_bill_route(
     try:
         bill = cancel_bill(session, bill=bill)
     except BillNotEditableError as exc:
+        # Keep the API's status-specific wording; the service message is
+        # shared with the bot.
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot cancel a bill in status '{bill.status}'.",
         ) from exc
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
