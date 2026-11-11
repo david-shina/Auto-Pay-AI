@@ -40,6 +40,7 @@ from app.services.banks import get_bank_directory
 from app.services.bill import (
     BillNotEditableError,
     BillValidationError,
+    cancel_bill,
     update_bill,
 )
 from app.services.date_parser import days_until, parse_bill_due_date
@@ -491,7 +492,7 @@ def schedule_bill(
 # ── POST /bills/{id}/cancel ─────────────────────────────────────────
 
 @router.post("/{bill_id}/cancel", response_model=BillActionResponse)
-def cancel_bill(
+def cancel_bill_route(
     bill_id: int,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_active_user),
@@ -499,15 +500,12 @@ def cancel_bill(
     bill = session.get(Bill, bill_id)
     if bill is None or bill.user_id != user.id:
         raise HTTPException(status_code=404, detail="Bill not found")
-    if bill.status in (BillStatus.PAID.value, BillStatus.PROCESSING.value):
+    try:
+        bill = cancel_bill(session, bill=bill)
+    except BillNotEditableError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Cannot cancel a bill in status '{bill.status}'.",
-        )
-    bill.status = BillStatus.CANCELLED.value
-    session.add(bill)
-    session.commit()
-    session.refresh(bill)
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     return BillActionResponse(
         bill=BillResponse.model_validate(bill),
         message="Bill cancelled.",

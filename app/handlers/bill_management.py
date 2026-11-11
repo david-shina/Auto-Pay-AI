@@ -34,6 +34,7 @@ from app.handlers.helpers import (
     safe_edit,
 )
 from app.models.bill import Bill
+from app.models.user import User
 from app.services.bill import (
     EDITABLE_STATUSES,
     BillNotEditableError,
@@ -300,27 +301,41 @@ async def bills_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 # ── Bill selected ──────────────────────────────────────────────────
 
 
-async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
+async def _callback_bill(query, *, action: str) -> tuple[User, dict] | None:
+    """Answer a bill tap and return `(user, bill)`, or refuse in place.
+
+    Every handler that acts on a bill id goes through here, so the
+    ownership and editable-status rules live in one place.
+    """
     await query.answer()
-    bill_id = int(query.data.split(":", 1)[1])
+    bill_id = int(query.data.split(":")[1])
 
     user = get_linked_user(str(query.message.chat_id))
     if user is None:
         await safe_edit(query, "🔒 Link your account with /link first.")
-        return ConversationHandler.END
+        return None
 
     bill = _load_bill(user.id, bill_id)
     if bill is None:
         await safe_edit(query, f"Bill #{bill_id} not found.")
-        return ConversationHandler.END
+        return None
     if bill["status"] not in EDITABLE_STATUSES:
         await safe_edit(
             query,
-            f"🔒 Bill #{bill_id} is *{bill['status']}* and can no longer be edited.",
+            f"🔒 Bill #{bill_id} is *{bill['status']}* and can no longer be {action}.",
             parse_mode="Markdown",
         )
+        return None
+    return user, bill
+
+
+async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    guard = await _callback_bill(query, action="edited")
+    if guard is None:
         return ConversationHandler.END
+    _user, bill = guard
+    bill_id = bill["id"]
 
     context.user_data["bm"] = {"bill_id": bill_id}
     await safe_edit(
@@ -334,30 +349,18 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
 async def handle_field(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer()
     parts = query.data.split(":")
     if len(parts) != 3 or parts[2] not in _FIELDS:
+        await query.answer()
         await safe_edit(query, "⚠️ Unknown field. Run /bills again.")
         return ConversationHandler.END
-    bill_id = int(parts[1])
     field = parts[2]
 
-    user = get_linked_user(str(query.message.chat_id))
-    if user is None:
-        await safe_edit(query, "🔒 Link your account with /link first.")
+    guard = await _callback_bill(query, action="edited")
+    if guard is None:
         return ConversationHandler.END
-
-    bill = _load_bill(user.id, bill_id)
-    if bill is None:
-        await safe_edit(query, f"Bill #{bill_id} not found.")
-        return ConversationHandler.END
-    if bill["status"] not in EDITABLE_STATUSES:
-        await safe_edit(
-            query,
-            f"🔒 Bill #{bill_id} is *{bill['status']}* and can no longer be edited.",
-            parse_mode="Markdown",
-        )
-        return ConversationHandler.END
+    _user, bill = guard
+    bill_id = bill["id"]
 
     context.user_data["bm"] = {"bill_id": bill_id, "field": field}
     await safe_edit(
@@ -519,18 +522,11 @@ async def handle_back_to_fields(
 ) -> int:
     """Back from a typed-value prompt, or "No" on the cancel prompt."""
     query = update.callback_query
-    await query.answer()
-    bill_id = int(query.data.split(":")[1])
-
-    user = get_linked_user(str(query.message.chat_id))
-    if user is None:
-        await safe_edit(query, "🔒 Link your account with /link first.")
+    guard = await _callback_bill(query, action="edited")
+    if guard is None:
         return ConversationHandler.END
-
-    bill = _load_bill(user.id, bill_id)
-    if bill is None:
-        await safe_edit(query, f"Bill #{bill_id} not found.")
-        return ConversationHandler.END
+    _user, bill = guard
+    bill_id = bill["id"]
 
     context.user_data["bm"] = {"bill_id": bill_id}
     await safe_edit(
@@ -566,25 +562,11 @@ async def handle_cancel_bill(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> int:
     query = update.callback_query
-    await query.answer()
-    bill_id = int(query.data.split(":")[1])
-
-    user = get_linked_user(str(query.message.chat_id))
-    if user is None:
-        await safe_edit(query, "🔒 Link your account with /link first.")
+    guard = await _callback_bill(query, action="cancelled")
+    if guard is None:
         return ConversationHandler.END
-
-    bill = _load_bill(user.id, bill_id)
-    if bill is None:
-        await safe_edit(query, f"Bill #{bill_id} not found.")
-        return ConversationHandler.END
-    if bill["status"] not in EDITABLE_STATUSES:
-        await safe_edit(
-            query,
-            f"🔒 Bill #{bill_id} is *{bill['status']}* and can no longer be cancelled.",
-            parse_mode="Markdown",
-        )
-        return ConversationHandler.END
+    _user, bill = guard
+    bill_id = bill["id"]
 
     context.user_data["bm"] = {"bill_id": bill_id}
     await safe_edit(
@@ -684,6 +666,9 @@ def build_bill_management() -> ConversationHandler:
             ],
             BILL_VALUE: [
                 edit_entry,
+                field,
+                back_menu,
+                cancel_bill,
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_value),
                 bank_choice,
                 back_fields,

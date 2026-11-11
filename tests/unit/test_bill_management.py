@@ -208,3 +208,65 @@ async def test_cancel_bill_needs_confirmation_then_cancels(session) -> None:
 
     session.expire_all()
     assert session.get(Bill, bill.id).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_bank_name_saves_directly_when_unambiguous(session) -> None:
+    from app.handlers.bill_management import (
+        BILL_FIELDS,
+        BILL_VALUE,
+        handle_field,
+        handle_value,
+    )
+
+    _user, bill = _make_user_and_bill(session, chat_id=55007)
+    ctx = _FakeContext()
+
+    update, _query = _callback_update(55007, f"bill_field:{bill.id}:bank")
+    assert await handle_field(update, ctx) == BILL_VALUE
+
+    update, msg = _text_update(55007, "GTBank")
+    assert await handle_value(update, ctx) == BILL_FIELDS
+    assert any("Bill updated" in r for r in msg.replies)
+
+    session.expire_all()
+    assert session.get(Bill, bill.id).bank_code == "058"
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_bank_name_offers_choices_then_saves_the_pick(
+    session,
+) -> None:
+    from app.handlers.bill_management import (
+        BILL_FIELDS,
+        BILL_VALUE,
+        handle_bank_choice,
+        handle_field,
+        handle_value,
+    )
+
+    _user, bill = _make_user_and_bill(session, chat_id=55008)
+    ctx = _FakeContext()
+
+    update, _query = _callback_update(55008, f"bill_field:{bill.id}:bank")
+    assert await handle_field(update, ctx) == BILL_VALUE
+
+    # "Trust" is not an exact name, so it must come back as choices.
+    update, msg = _text_update(55008, "Trust")
+    assert await handle_value(update, ctx) == BILL_VALUE
+    markup = msg.markups[-1]
+    assert markup is not None
+    choices = [
+        b.callback_data
+        for row in markup.inline_keyboard
+        for b in row
+        if b.callback_data.startswith("bill_bank:")
+    ]
+    assert len(choices) >= 2, choices
+
+    update, query = _callback_update(55008, choices[0])
+    assert await handle_bank_choice(update, ctx) == BILL_FIELDS
+
+    picked_code = choices[0].rsplit(":", 1)[1]
+    session.expire_all()
+    assert session.get(Bill, bill.id).bank_code == picked_code

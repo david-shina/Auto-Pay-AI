@@ -59,17 +59,6 @@ class BillCreateRequest(BaseModel):
     bank_name: str | None = Field(default=None, max_length=128)
 
 
-class BillBankUpdateRequest(BaseModel):
-    """Deprecated alias kept so older clients keep importing cleanly.
-
-    Use `BillUpdateRequest`, which accepts every editable field.
-    """
-
-    account_number: str | None = Field(default=None, max_length=32)
-    bank_code: str | None = Field(default=None, max_length=128)
-    bank_name: str | None = Field(default=None, max_length=128)
-
-
 class BillUpdateRequest(BaseModel):
     """Edit an existing bill. Every field is optional; only the ones sent
     are changed, and an explicit `recurrence_interval: null` turns a
