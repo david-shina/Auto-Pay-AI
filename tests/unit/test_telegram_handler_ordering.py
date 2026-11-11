@@ -156,7 +156,36 @@ def test_topup_registered_before_bill(built_app) -> None:
     )
 
 
-# ── 3. End-to-end: dispatching /topup via process_update replies ──
+def _find_bills_management(app):
+    """Locate the bill-management ConversationHandler by its /bills
+    CommandHandler entry point."""
+    for handler in app.handlers[0]:
+        if not isinstance(handler, ConversationHandler):
+            continue
+        for ep in handler.entry_points or []:
+            if isinstance(ep, CommandHandler) and "bills" in ep.commands:
+                return handler
+    raise AssertionError("no bill-management ConversationHandler found")
+
+
+# ── 3. Bill management is registered before the bill conversation ─
+
+
+def test_bills_management_registered_before_bill(built_app) -> None:
+    """`/bills` opens the edit conversation, and its BILL_VALUE state
+    accepts free text. It must be registered before the extract-a-bill
+    conversation or a typed amount would start a new bill instead."""
+    handlers = built_app.handlers[0]
+    bills_idx = handlers.index(_find_bills_management(built_app))
+    bill_idx = handlers.index(_find_bill_conversation(built_app))
+
+    assert bills_idx < bill_idx, (
+        f"bill management (idx {bills_idx}) must precede the bill "
+        f"conversation (idx {bill_idx})"
+    )
+
+
+# ── 4. End-to-end: dispatching /topup via process_update replies ──
 
 
 @pytest.mark.asyncio

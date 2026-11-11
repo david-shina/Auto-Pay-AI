@@ -126,8 +126,9 @@ const API = (() => {
       // Defer to the due date. Moves no money now, so no confirmation.
       schedule: (id, d = {}) => request("POST", `/bills/${id}/schedule`, d),
       cancel: (id) => request("POST", `/bills/${id}/cancel`),
-      // Set / correct the payee bank. `bank_code` accepts a code or a
-      // name; the server resolves it and stores a real code.
+      // Edit any editable field (vendor, amount, due date, account, bank,
+      // recurrence). `setBank` remains as an alias for the bank picker.
+      update: (id, d) => request("PATCH", `/bills/${id}`, d),
       setBank: (id, d) => request("PATCH", `/bills/${id}`, d),
     },
 
@@ -438,6 +439,7 @@ function billRow(b) {
   // `pending` state is undecided; `scheduled` is already committed.
   const needsAction = b.status === "pending";
   const canSchedule = needsAction || b.status === "failed";
+  const isEditable = ["pending", "scheduled", "failed"].includes(b.status);
   return `<tr>
     <td>${esc(b.vendor_name)}</td>
     <td>${fmtMoney(b.amount)}</td>
@@ -445,6 +447,7 @@ function billRow(b) {
     <td>${statusBadge(b.status)}</td>
     <td class="flex gap-2">
       ${needsAction ? `<span class="badge badge-hold">needs action</span>` : ""}
+      ${isEditable ? `<button class="btn-ghost text-xs py-1 px-3" onclick="openBillEditor(${b.id})">Edit</button>` : ""}
       ${needsBank ? `<button class="btn-lime text-xs py-1 px-3" onclick="openBankPicker(${b.id})">Set bank</button>` : ""}
       ${isPending && b.bank_code ? `<button class="btn-lime text-xs py-1 px-3" onclick="payBill(${b.id})">Pay now</button>` : ""}
       ${canSchedule ? `<button class="btn-outline text-xs py-1 px-3" onclick="scheduleBill(${b.id})">Schedule</button>` : ""}
@@ -548,6 +551,102 @@ function filterBills(status, btn) {
   document.querySelectorAll("#bill-filters .nav-item").forEach((b) => b.classList.remove("active"));
   btn.classList.add("active");
   loadBills(status);
+}
+
+// Edit a bill that has not been paid yet. The form sends the current
+// values, so an edit is always explicit; the server rejects terminal
+// states with 409.
+async function openBillEditor(billId) {
+  let bill;
+  try {
+    bill = await API.bills.get(billId);
+  } catch (err) {
+    toast(err.message, "error");
+    return;
+  }
+
+  document.getElementById("bill-editor")?.remove();
+
+  const wrap = document.createElement("div");
+  wrap.id = "bill-editor";
+  wrap.setAttribute(
+    "style",
+    "position:fixed;inset:0;background:rgba(0,0,0,.65);display:flex;" +
+      "align-items:center;justify-content:center;z-index:1000;padding:1rem"
+  );
+  wrap.innerHTML = `
+    <div class="card p-6" style="width:min(30rem,100%);max-height:88vh;overflow:auto">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="font-syne text-lg font-bold">Edit bill</h3>
+        <button class="btn-ghost text-sm" id="bill-editor-close">Close</button>
+      </div>
+      <label class="label">Vendor</label>
+      <input class="input" id="be-vendor" value="${esc(bill.vendor_name || "")}" />
+      <label class="label mt-3">Amount (NGN)</label>
+      <input class="input" id="be-amount" type="number" min="100" step="0.01" value="${Number(bill.amount)}" />
+      <label class="label mt-3">Due date</label>
+      <input class="input" id="be-due" type="date" value="${(bill.due_date || "").slice(0, 10)}" />
+      <label class="label mt-3">Account number</label>
+      <input class="input" id="be-account" value="${esc(bill.account_number || "")}" />
+      <label class="label mt-3">Bank (name or code)</label>
+      <input class="input" id="be-bank" value="${esc(bill.bank_name || bill.bank_code || "")}" />
+      <label class="label mt-3">Repeat</label>
+      <select class="input" id="be-repeat">
+        <option value="none">One-off</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option>
+      </select>
+      <button class="btn-lime w-full mt-4" id="bill-editor-save">Save changes</button>
+    </div>`;
+  document.body.appendChild(wrap);
+
+  const repeat = document.getElementById("be-repeat");
+  repeat.value = bill.is_recurring ? bill.recurrence_interval || "none" : "none";
+
+  const close = () => wrap.remove();
+  document.getElementById("bill-editor-close").onclick = close;
+  wrap.addEventListener("click", (e) => {
+    if (e.target === wrap) close();
+  });
+
+  document.getElementById("bill-editor-save").addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    const vendor = document.getElementById("be-vendor").value.trim();
+    const amount = Number(document.getElementById("be-amount").value);
+    const dueVal = document.getElementById("be-due").value;
+
+    if (!vendor) {
+      toast("Vendor is required.", "error");
+      return;
+    }
+    if (!(amount > 0)) {
+      toast("Enter a valid amount.", "error");
+      return;
+    }
+
+    const payload = {
+      vendor_name: vendor,
+      amount,
+      account_number: document.getElementById("be-account").value.trim(),
+      bank_name: document.getElementById("be-bank").value.trim(),
+      recurrence_interval: repeat.value === "none" ? null : repeat.value,
+    };
+    if (dueVal) {
+      payload.due_date = new Date(dueVal + "T00:00:00").toISOString();
+    }
+
+    btn.disabled = true;
+    try {
+      await API.bills.update(billId, payload);
+      close();
+      toast("Bill updated.", "success");
+      loadBills();
+    } catch (err) {
+      toast(err.message, "error");
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 async function payBill(id) {

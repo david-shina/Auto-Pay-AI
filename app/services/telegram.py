@@ -38,7 +38,6 @@ from telegram.ext import (
 
 from app.core.config import settings
 from app.handlers.auth import (
-    bills_command,
     help_command,
     link_command,
     otp_command,
@@ -48,6 +47,7 @@ from app.handlers.auth import (
     wallet_command,
 )
 from app.handlers.bill_conversation import build_bill_conversation
+from app.handlers.bill_management import build_bill_management
 from app.handlers.helpers import escape_md
 from app.handlers.schedule_conversation import build_schedule_conversation
 from app.handlers.topup_conversation import build_topup_conversation
@@ -87,13 +87,16 @@ def build_application(token: str) -> Application:
     # conversation's entry point and silently swallowed.
     app.add_handler(build_topup_conversation())
     app.add_handler(build_schedule_conversation())
+    # Bill management must come before the extract-a-bill conversation:
+    # its BILL_VALUE state accepts free text, and /bills is a command
+    # that the bill entry point must not claim.
+    app.add_handler(build_bill_management())
     app.add_handler(build_bill_conversation())
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CommandHandler("unlink", unlink_command))
     app.add_handler(CommandHandler("wallet", wallet_command))
-    app.add_handler(CommandHandler("bills", bills_command))
     app.add_handler(CommandHandler("transactions", transactions_command))
     app.add_handler(CommandHandler("otp", otp_command))
 

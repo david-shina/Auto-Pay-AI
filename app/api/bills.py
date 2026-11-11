@@ -28,15 +28,20 @@ from app.models.enums import BillStatus
 from app.models.user import User
 from app.schemas.bill import (
     BillActionResponse,
-    BillBankUpdateRequest,
     BillCreateRequest,
     BillResponse,
     BillScheduleRequest,
+    BillUpdateRequest,
     TransferOtpRequest,
 )
 from app.services.audit import audit_bill_created
 from app.services.auth import get_current_active_user
 from app.services.banks import get_bank_directory
+from app.services.bill import (
+    BillNotEditableError,
+    BillValidationError,
+    update_bill,
+)
 from app.services.date_parser import days_until, parse_bill_due_date
 from app.services.loaders import loader_from_upload
 from app.services.payments import PaymentProvider, get_payment_provider
@@ -276,41 +281,35 @@ async def create_bill(
 
 
 @router.patch("/{bill_id}", response_model=BillResponse)
-def update_bill_payout_account(
+def update_bill_details(
     bill_id: int,
-    payload: BillBankUpdateRequest,
+    payload: BillUpdateRequest,
     session: Session = Depends(get_session),
     user: User = Depends(get_current_active_user),
 ) -> BillResponse:
-    """Correct the payout destination (bank / account) on a bill.
+    """Edit a bill that has not been paid yet.
 
-    This is the escape hatch for bills created before the bank
-    directory existed, or whose bank came back from OCR as a name we
-    could not resolve. Without it the only fix was to delete and
-    recreate the bill.
+    Accepts any subset of vendor, amount, due date, account, bank and
+    recurrence. Paid, processing and cancelled bills are final (409).
+    This is also the escape hatch for bills whose bank came back from OCR
+    as a name that could not be resolved.
     """
     bill = session.get(Bill, bill_id)
     if bill is None or bill.user_id != user.id:
         raise HTTPException(status_code=404, detail="Bill not found")
-    if bill.status in (BillStatus.PAID.value, BillStatus.PROCESSING.value):
+
+    changes = payload.model_dump(exclude_unset=True)
+    try:
+        bill = update_bill(session, bill=bill, changes=changes)
+    except BillNotEditableError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="This bill has already been paid or is being paid.",
-        )
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except BillValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
 
-    if payload.account_number is not None:
-        bill.account_number = payload.account_number.strip() or None
-
-    if payload.bank_code is not None or payload.bank_name is not None:
-        bank_code, bank_name = _resolve_bank_or_422(
-            session, bank_code=payload.bank_code, bank_name=payload.bank_name
-        )
-        bill.bank_code = bank_code
-        bill.bank_name = bank_name
-
-    session.add(bill)
-    session.commit()
-    session.refresh(bill)
     return BillResponse.model_validate(bill)
 
 

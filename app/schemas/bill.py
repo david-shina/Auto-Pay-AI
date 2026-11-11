@@ -60,17 +60,28 @@ class BillCreateRequest(BaseModel):
 
 
 class BillBankUpdateRequest(BaseModel):
-    """Set or correct the payout destination on an existing bill.
+    """Deprecated alias kept so older clients keep importing cleanly.
 
-    Used by the SPA when a bill was created with a bank we could not
-    resolve (typically an OCR'd bank name). `bank_code` accepts either a
-    code or a name - the API normalises it through the bank directory
-    and stores only a real code.
+    Use `BillUpdateRequest`, which accepts every editable field.
     """
 
     account_number: str | None = Field(default=None, max_length=32)
     bank_code: str | None = Field(default=None, max_length=128)
     bank_name: str | None = Field(default=None, max_length=128)
+
+
+class BillUpdateRequest(BaseModel):
+    """Edit an existing bill. Every field is optional; only the ones sent
+    are changed, and an explicit `recurrence_interval: null` turns a
+    recurring bill back into a one-off."""
+
+    vendor_name: str | None = Field(default=None, min_length=1, max_length=255)
+    amount: float | None = Field(default=None, gt=0)
+    due_date: datetime | None = None
+    account_number: str | None = Field(default=None, max_length=32)
+    bank_code: str | None = Field(default=None, max_length=128)
+    bank_name: str | None = Field(default=None, max_length=128)
+    recurrence_interval: Literal["weekly", "monthly"] | None = None
 
 
 class BillScheduleRequest(BaseModel):

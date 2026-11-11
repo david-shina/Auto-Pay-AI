@@ -238,48 +238,6 @@ async def wallet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-# ── /bills ──────────────────────────────────────────────────────────
-
-async def bills_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from app.models.bill import Bill
-    chat_id = str(update.effective_chat.id)
-    user = get_linked_user(chat_id)
-    if user is None:
-        await update.message.reply_text(
-            "🔒 Link your account first with `/link YOUR_CODE`",
-            parse_mode="Markdown",
-        )
-        return
-
-    with session_scope() as session:
-        from sqlalchemy import select as _sa_select
-        rows = session.execute(
-            _sa_select(Bill)
-            .where(Bill.user_id == user.id)
-            .order_by(Bill.due_date.asc())
-            .limit(20)
-        ).scalars().all()
-
-    if not rows:
-        await update.message.reply_text(
-            "📭 You have no bills yet. Send me a bill, or `/schedule` a recurring one."
-        )
-        return
-
-    lines = ["📋 *Your recent bills*\n"]
-    for b in rows:
-        try:
-            amount = f"₦{float(b.amount):,.2f}"
-        except (TypeError, ValueError):
-            amount = "N/A"
-        recur_marker = " 🔁" if getattr(b, "is_recurring", False) else ""
-        lines.append(
-            f"• *#{b.id}* `{escape_md(b.vendor_name)}`{recur_marker} — {amount} "
-            f"_(status: {b.status}, due {b.due_date.date() if b.due_date else '?'})_"
-        )
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
 # ── /transactions ───────────────────────────────────────────────────
 
 
